@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Wifi, Settings2, ChartBar, Bot, X } from "lucide-react";
+import { Wifi, Settings2, ChartBar, Bot, X, Code, Cloud, BarChart3 } from "lucide-react";
 import { TopBar } from "./TopBar";
 import { SourceRow } from "./SourceRow";
 import { BottomPanel } from "./BottomPanel";
@@ -12,10 +12,11 @@ import SchedulerPage from "../automation/SchedulerPage";
 import { startCrossfade, startStream, stopStream, getStreamStatus, onStreamConnected, onStreamDisconnected } from "../../lib/bridge";
 import type { DeckId } from "../../lib/bridge";
 import { ScriptingPage } from "../../pages/ScriptingPage";
+import { GatewayPage } from "../../pages/GatewayPage";
+import { AnalyticsPage } from "../../pages/AnalyticsPage";
 import { VoiceFXStrip } from "../voice/VoiceFXStrip";
 import { MicSettings } from "../voice/MicSettings";
 import { VoiceTrackRecorder } from "../voice/VoiceTrackRecorder";
-import { Code } from "lucide-react";
 
 type PipelineTarget = { channel: DeckId | "master"; label: string; stage: string } | null;
 
@@ -94,6 +95,8 @@ export function MainWindow() {
     const [showStream, setShowStream] = useState(false);
     const [showScheduler, setShowScheduler] = useState(false);
     const [showScripting, setShowScripting] = useState(false);
+    const [showGateway, setShowGateway] = useState(false);
+    const [showAnalytics, setShowAnalytics] = useState(false);
     const [showMicSettings, setShowMicSettings] = useState(false);
     const [showVtRecorder, setShowVtRecorder] = useState(false);
     const [dspTarget, setDspTarget] = useState<PipelineTarget>(null);
@@ -245,15 +248,30 @@ export function MainWindow() {
                     className="btn btn-ghost"
                     style={{
                         fontSize: 10,
-                        background: showScripting ? "rgba(16,185,129,.15)" : "transparent",
-                        borderColor: showScripting ? "rgba(16,185,129,.5)" : "var(--border-default)",
-                        color: showScripting ? "#10b981" : "var(--text-muted)",
+                        background: showGateway ? "rgba(59,130,246,.15)" : "transparent",
+                        borderColor: showGateway ? "rgba(59,130,246,.5)" : "var(--border-default)",
+                        color: showGateway ? "#3b82f6" : "var(--text-muted)",
                     }}
-                    onClick={() => setShowScripting((v) => !v)}
-                    title="Scripting"
+                    onClick={() => setShowGateway((v) => !v)}
+                    title="Gateway"
                 >
-                    <Code size={12} />
-                    Scripting
+                    <Cloud size={12} />
+                    Gateway
+                </button>
+
+                <button
+                    className="btn btn-ghost"
+                    style={{
+                        fontSize: 10,
+                        background: showAnalytics ? "rgba(251,146,60,.15)" : "transparent",
+                        borderColor: showAnalytics ? "rgba(251,146,60,.5)" : "var(--border-default)",
+                        color: showAnalytics ? "#fb923c" : "var(--text-muted)",
+                    }}
+                    onClick={() => setShowAnalytics((v) => !v)}
+                    title="Analytics"
+                >
+                    <BarChart3 size={12} />
+                    Analytics
                 </button>
 
                 <div style={{ marginLeft: "auto" }} />
@@ -489,6 +507,124 @@ export function MainWindow() {
                         </div>
                         <div style={{ flex: 1, overflow: "hidden" }}>
                             <ScriptingPage />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Gateway page modal */}
+            {showGateway && (
+                <div
+                    style={{
+                        position: "fixed", inset: 0,
+                        background: "rgba(0,0,0,0.65)",
+                        zIndex: 151,
+                        backdropFilter: "blur(4px)",
+                        display: "flex",
+                        alignItems: "stretch",
+                    }}
+                    onClick={() => setShowGateway(false)}
+                >
+                    <div
+                        style={{
+                            position: "absolute",
+                            top: 0, right: 0, bottom: 0,
+                            width: "min(900px, 95vw)",
+                            background: "var(--bg-panel)",
+                            borderLeft: "1px solid var(--border-strong)",
+                            display: "flex",
+                            flexDirection: "column",
+                            overflow: "hidden",
+                            animation: "slideInRight 200ms ease",
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "10px 14px",
+                                borderBottom: "1px solid var(--border-default)",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <Cloud size={15} style={{ color: "#3b82f6" }} />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                                DBE Gateway
+                            </span>
+                            <button
+                                onClick={() => setShowGateway(false)}
+                                style={{
+                                    marginLeft: "auto",
+                                    background: "none", border: "none",
+                                    color: "var(--text-dim)", cursor: "pointer",
+                                }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                        <div style={{ flex: 1, overflow: "hidden" }}>
+                            <GatewayPage />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Analytics page modal */}
+            {showAnalytics && (
+                <div
+                    style={{
+                        position: "fixed", inset: 0,
+                        background: "rgba(0,0,0,0.65)",
+                        zIndex: 151,
+                        backdropFilter: "blur(4px)",
+                        display: "flex",
+                        alignItems: "stretch",
+                    }}
+                    onClick={() => setShowAnalytics(false)}
+                >
+                    <div
+                        style={{
+                            position: "absolute",
+                            top: 0, right: 0, bottom: 0,
+                            width: "min(900px, 95vw)",
+                            background: "var(--bg-panel)",
+                            borderLeft: "1px solid var(--border-strong)",
+                            display: "flex",
+                            flexDirection: "column",
+                            overflow: "hidden",
+                            animation: "slideInRight 200ms ease",
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "10px 14px",
+                                borderBottom: "1px solid var(--border-default)",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <BarChart3 size={15} style={{ color: "#fb923c" }} />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                                Analytics & Operations
+                            </span>
+                            <button
+                                onClick={() => setShowAnalytics(false)}
+                                style={{
+                                    marginLeft: "auto",
+                                    background: "none", border: "none",
+                                    color: "var(--text-dim)", cursor: "pointer",
+                                }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                        <div style={{ flex: 1, overflow: "hidden" }}>
+                            <AnalyticsPage />
                         </div>
                     </div>
                 </div>

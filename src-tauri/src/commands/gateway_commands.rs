@@ -1,6 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::State;
 
 use crate::gateway::client::{GatewayClient, GatewayMessage, GatewayStatus};
@@ -24,8 +22,6 @@ pub async fn connect_gateway(
     let mut client = GatewayClient::new(url.clone(), token);
 
     // Create message handler
-    let app_state = state.inner();
-
     client
         .connect(move |msg| {
             // Handle incoming messages from gateway
@@ -43,7 +39,7 @@ pub async fn connect_gateway(
                 }
                 GatewayMessage::RemoteDjJoined {
                     session_id,
-                    user_id,
+                    user_id: _,
                     display_name,
                 } => {
                     log::info!("Remote DJ joined: {} ({})", display_name, session_id);
@@ -67,9 +63,13 @@ pub async fn connect_gateway(
 /// Disconnect from gateway
 #[tauri::command]
 pub async fn disconnect_gateway(state: State<'_, AppState>) -> Result<(), String> {
-    let mut client_guard = state.gateway_client.lock().unwrap();
-    if let Some(mut client) = client_guard.take() {
-        client.disconnect().await;
+    let mut client = {
+        let mut client_guard = state.gateway_client.lock().unwrap();
+        client_guard.take()
+    };
+
+    if let Some(ref mut c) = client {
+        c.disconnect().await;
     }
     Ok(())
 }
@@ -77,9 +77,13 @@ pub async fn disconnect_gateway(state: State<'_, AppState>) -> Result<(), String
 /// Get gateway connection status
 #[tauri::command]
 pub async fn get_gateway_status(state: State<'_, AppState>) -> Result<GatewayStatus, String> {
-    let client_guard = state.gateway_client.lock().unwrap();
-    if let Some(client) = client_guard.as_ref() {
-        Ok(client.get_status().await)
+    let client = {
+        let client_guard = state.gateway_client.lock().unwrap();
+        client_guard.as_ref().cloned()
+    };
+
+    if let Some(c) = client {
+        Ok(c.get_status().await)
     } else {
         Ok(GatewayStatus {
             connected: false,
@@ -102,7 +106,7 @@ pub async fn set_autopilot(
     autopilot.mode = mode;
 
     // Push to gateway if connected
-    if let Some(client) = state.gateway_client.lock().unwrap().as_ref() {
+    if let Some(_client) = state.gateway_client.lock().unwrap().as_ref() {
         // TODO: send autopilot status update to gateway
         log::info!("AutoPilot status updated: enabled={}", enabled);
     }
@@ -209,4 +213,9 @@ pub fn set_mix_minus(enabled: bool, state: State<'_, AppState>) -> Result<(), St
 
     Ok(())
 }
+
+
+
+
+
 

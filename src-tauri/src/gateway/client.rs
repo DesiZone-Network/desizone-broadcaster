@@ -89,6 +89,18 @@ pub struct GatewayClient {
     status: Arc<tokio::sync::Mutex<GatewayStatus>>,
 }
 
+impl Clone for GatewayClient {
+    fn clone(&self) -> Self {
+        Self {
+            url: self.url.clone(),
+            token: self.token.clone(),
+            connected: self.connected.clone(),
+            tx: self.tx.clone(),
+            status: self.status.clone(),
+        }
+    }
+}
+
 impl GatewayClient {
     pub fn new(url: String, token: String) -> Self {
         let status = GatewayStatus {
@@ -199,4 +211,5 @@ impl GatewayClient {
         status.connected = false;
     }
 }
+
 
