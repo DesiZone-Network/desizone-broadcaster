@@ -1,0 +1,49 @@
+[package]
+name = "desizone-broadcaster"
+version = "0.1.0"
+description = "DesiZone Broadcaster - Desktop Radio Broadcasting App"
+authors = ["DesiZone Network"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "desizone_broadcaster_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+cpal = { version = "0.15", features = [] }
+symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "ogg", "wav"] }
+ringbuf = "0.4"
+biquad = "0.4"
+dasp = { version = "0.11", features = ["signal", "interpolate"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "sqlite", "mysql", "macros", "chrono"] }
+reqwest = { version = "0.12", features = ["stream", "blocking", "json"] }
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+mlua = { version = "0.10", features = ["lua54", "async", "send", "vendored"] }
+hound = "3.5"   # WAV writing for voice track recording
+# Phase 6 — Gateway integration
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+jsonwebtoken = "9"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
