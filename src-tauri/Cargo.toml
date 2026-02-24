@@ -37,6 +37,7 @@ hound = "3.5"   # WAV writing for voice track recording
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
 jsonwebtoken = "9"
+urlencoding = "2"          # URL-encode MySQL passwords with special chars
 
 [profile.dev]
 incremental = true

@@ -62,28 +62,59 @@ export interface CuePoint {
 }
 
 export interface SamSong {
-  songid: number;
+  id: number;           // SAM primary key (ID column)
+  filename: string;
+  songtype: string;     // 'S'=Song, 'J'=Jingle, etc.
+  status: number;       // 0=disabled, 1=enabled
+  weight: number;
   artist: string;
   title: string;
-  filename: string;
-  duration: number;
-  intro: number;
-  outro: number;
-  bpm: number | null;
-  gain: number | null;
+  album: string;
+  genre: string;
+  albumyear: string;
+  duration: number;     // seconds
+  bpm: number;
+  xfade: string;        // crossfade preset name
+  mood: string;
+  mood_ai: string | null;
+  rating: number;
+  count_played: number;
+  date_played: string | null;
+  label: string;
+  isrc: string;
+  upc: string;          // also used as Spotify ID
+  picture: string | null;
+  overlay: string;      // 'yes' | 'no'
 }
 
 export interface QueueEntry {
-  queueid: number | null;
-  songid: number;
-  played: number;
-  playtime: number | null;
+  id: number;           // SAM queue primary key
+  song_id: number;      // songID
+  sort_id: number;      // sortID (float ordering)
+  requests: number;
+  request_id: number;
+  plotw: number;        // 0=Song/PLO, 1=VoiceBreak/TW
+  dedication: number;
 }
 
 export interface HistoryEntry {
-  histid: number | null;
-  songid: number;
-  played_at: number;
+  id: number;
+  song_id: number;
+  filename: string;
+  date_played: string;  // MySQL datetime
+  duration: number;
+  artist: string;
+  title: string;
+  album: string;
+  albumyear: string;
+  listeners: number;
+  label: string;
+  isrc: string;
+  upc: string;
+  songtype: string;
+  request_id: number;
+  overlay: string;
+  songrights: string;
 }
 
 export interface ChannelDspSettings {
@@ -189,11 +220,81 @@ export const addToQueue = (songId: number) =>
 export const removeFromQueue = (queueId: number) =>
   invoke<void>("remove_from_queue", { queueId });
 
-export const searchSongs = (query: string, limit = 50) =>
-  invoke<SamSong[]>("search_songs", { query, limit });
+/** Remove queue entry AND write a full history snapshot in one call. */
+export const completeQueueItem = (queueId: number, songId: number) =>
+  invoke<void>("complete_queue_item", { queueId, songId });
+
+export const searchSongs = (query: string, limit = 50, offset = 0) =>
+  invoke<SamSong[]>("search_songs", { query, limit, offset });
 
 export const getHistory = (limit = 20) =>
   invoke<HistoryEntry[]>("get_history", { limit });
+
+// ── SAM DB connection management ─────────────────────────────────────────────
+
+export interface SamDbConnectArgs {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  database: string;
+  auto_connect: boolean;
+  path_prefix_from?: string;
+  path_prefix_to?: string;
+}
+
+/** Saved connection config returned by the backend (no password). */
+export interface SamDbConfig {
+  host: string;
+  port: number;
+  username: string;
+  database_name: string;
+  auto_connect: boolean;
+  /** Windows-style path prefix to strip (e.g. `C:\Music\`). Empty = no translation. */
+  path_prefix_from: string;
+  /** Local path to substitute (e.g. `/Volumes/Music/`). Empty = no translation. */
+  path_prefix_to: string;
+}
+
+export interface SamDbStatus {
+  connected: boolean;
+  host: string | null;
+  database: string | null;
+  error: string | null;
+}
+
+export interface SamCategory {
+  id: number;
+  catname: string;
+}
+
+/** Test a connection without persisting anything. */
+export const testSamDbConnection = (args: SamDbConnectArgs) =>
+  invoke<SamDbStatus>("test_sam_db_connection", { args });
+
+/** Connect, save config to SQLite, and store pool in AppState. */
+export const connectSamDb = (args: SamDbConnectArgs) =>
+  invoke<SamDbStatus>("connect_sam_db", { args });
+
+/** Drop the pool. */
+export const disconnectSamDb = () =>
+  invoke<void>("disconnect_sam_db");
+
+/** Return saved config (no password). */
+export const getSamDbConfig = () =>
+  invoke<SamDbConfig>("get_sam_db_config_cmd");
+
+/** Persist config + password to SQLite without connecting. */
+export const saveSamDbConfig = (config: SamDbConfig, password: string) =>
+  invoke<void>("save_sam_db_config_cmd", { config, password });
+
+/** Return live connection status. */
+export const getSamDbStatus = () =>
+  invoke<SamDbStatus>("get_sam_db_status");
+
+/** Return SAM categories (empty array if catlist table absent). */
+export const getSamCategories = () =>
+  invoke<SamCategory[]>("get_sam_categories");
 
 // ── Streaming ────────────────────────────────────────────────────────────────
 
@@ -253,10 +354,9 @@ export const getWaveformData = (filePath: string, resolution = 1000) =>
 
 // ── Phase 2 — Song details ───────────────────────────────────────────────────
 
+/** Extended song detail — adds local-only metadata on top of SAM fields. */
 export interface SongDetail extends SamSong {
-  album: string | null;
-  year: number | null;
-  genre: string | null;
+  year: number | null;       // albumyear parsed as int (frontend convenience)
   comment: string | null;
   file_size: number | null;
   bitrate: number | null;

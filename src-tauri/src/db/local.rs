@@ -156,6 +156,71 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             disconnected_at INTEGER,
             commands_sent   INTEGER DEFAULT 0
         );
+
+        -- Phase 7: Play statistics cache
+        CREATE TABLE IF NOT EXISTS play_stats_cache (
+            song_id         INTEGER NOT NULL,
+            period          TEXT    NOT NULL,
+            play_count      INTEGER DEFAULT 0,
+            total_played_ms INTEGER DEFAULT 0,
+            last_played_at  INTEGER,
+            skip_count      INTEGER DEFAULT 0,
+            PRIMARY KEY (song_id, period)
+        );
+
+        -- Phase 7: Hourly play counts
+        CREATE TABLE IF NOT EXISTS hourly_play_counts (
+            date            TEXT    NOT NULL,
+            hour            INTEGER NOT NULL,
+            play_count      INTEGER DEFAULT 0,
+            unique_songs    INTEGER DEFAULT 0,
+            PRIMARY KEY (date, hour)
+        );
+
+        -- Phase 7: Event log
+        CREATE TABLE IF NOT EXISTS event_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       INTEGER NOT NULL,
+            level           TEXT    NOT NULL,
+            category        TEXT    NOT NULL,
+            event           TEXT    NOT NULL,
+            message         TEXT    NOT NULL,
+            metadata_json   TEXT,
+            deck            TEXT,
+            song_id         INTEGER,
+            encoder_id      INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_event_log_timestamp ON event_log(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_event_log_category ON event_log(category);
+        CREATE INDEX IF NOT EXISTS idx_event_log_level ON event_log(level);
+
+        -- Phase 7: System health snapshots
+        CREATE TABLE IF NOT EXISTS system_health_snapshots (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp               INTEGER NOT NULL,
+            cpu_pct                 REAL,
+            memory_mb               REAL,
+            ring_buffer_fill_deck_a REAL,
+            ring_buffer_fill_deck_b REAL,
+            decoder_latency_ms      REAL,
+            stream_connected        INTEGER,
+            mysql_connected         INTEGER,
+            active_encoders         INTEGER
+        );
+
+        -- SAM Broadcaster MySQL connection settings
+        CREATE TABLE IF NOT EXISTS sam_db_config (
+            id               INTEGER PRIMARY KEY DEFAULT 1,
+            host             TEXT    NOT NULL DEFAULT '127.0.0.1',
+            port             INTEGER NOT NULL DEFAULT 3306,
+            username         TEXT    NOT NULL DEFAULT '',
+            password         TEXT    NOT NULL DEFAULT '',
+            database_name    TEXT    NOT NULL DEFAULT 'samdb',
+            auto_connect     INTEGER NOT NULL DEFAULT 0,
+            path_prefix_from TEXT    NOT NULL DEFAULT '',
+            path_prefix_to   TEXT    NOT NULL DEFAULT ''
+        );
         "#,
     )
     .execute(pool)
@@ -597,6 +662,124 @@ pub async fn log_remote_session_end(
     .bind(now_ms)
     .bind(commands_sent as i64)
     .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── SAM DB connection config ──────────────────────────────────────────────────
+
+/// Stored SAM DB connection settings (password omitted from public-facing struct).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SamDbConfig {
+    pub host: String,
+    pub port: i64,
+    pub username: String,
+    pub database_name: String,
+    pub auto_connect: bool,
+    /// Windows-style path prefix to replace (e.g. `C:\Music\`). Empty = no translation.
+    pub path_prefix_from: String,
+    /// Local path to substitute in (e.g. `/Volumes/Music/`). Empty = no translation.
+    pub path_prefix_to: String,
+}
+
+impl Default for SamDbConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            username: String::new(),
+            database_name: "samdb".into(),
+            auto_connect: false,
+            path_prefix_from: String::new(),
+            path_prefix_to: String::new(),
+        }
+    }
+}
+
+/// Internal row that includes the password — only used at startup for auto-connect.
+pub struct SamDbConfigFull {
+    pub config: SamDbConfig,
+    pub password: String,
+}
+
+/// Load SAM DB config (without password).
+pub async fn get_sam_db_config(pool: &SqlitePool) -> Result<SamDbConfig, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT host, port, username, database_name, auto_connect, \
+         path_prefix_from, path_prefix_to FROM sam_db_config WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => Ok(SamDbConfig {
+            host: r.get("host"),
+            port: r.get("port"),
+            username: r.get("username"),
+            database_name: r.get("database_name"),
+            auto_connect: r.get::<i64, _>("auto_connect") != 0,
+            path_prefix_from: r.get("path_prefix_from"),
+            path_prefix_to: r.get("path_prefix_to"),
+        }),
+        None => Ok(SamDbConfig::default()),
+    }
+}
+
+/// Load the full config including password — only for internal startup use.
+pub async fn load_sam_db_config_full(pool: &SqlitePool) -> Result<Option<SamDbConfigFull>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT host, port, username, password, database_name, auto_connect, \
+         path_prefix_from, path_prefix_to FROM sam_db_config WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| SamDbConfigFull {
+        password: r.get("password"),
+        config: SamDbConfig {
+            host: r.get("host"),
+            port: r.get("port"),
+            username: r.get("username"),
+            database_name: r.get("database_name"),
+            auto_connect: r.get::<i64, _>("auto_connect") != 0,
+            path_prefix_from: r.get("path_prefix_from"),
+            path_prefix_to: r.get("path_prefix_to"),
+        },
+    }))
+}
+
+/// Save SAM DB config including password (stored locally only).
+pub async fn save_sam_db_config(
+    pool: &SqlitePool,
+    config: &SamDbConfig,
+    password: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO sam_db_config
+            (id, host, port, username, password, database_name,
+             auto_connect, path_prefix_from, path_prefix_to)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            host             = excluded.host,
+            port             = excluded.port,
+            username         = excluded.username,
+            password         = excluded.password,
+            database_name    = excluded.database_name,
+            auto_connect     = excluded.auto_connect,
+            path_prefix_from = excluded.path_prefix_from,
+            path_prefix_to   = excluded.path_prefix_to
+        "#,
+    )
+    .bind(&config.host)
+    .bind(config.port)
+    .bind(&config.username)
+    .bind(password)
+    .bind(&config.database_name)
+    .bind(config.auto_connect as i64)
+    .bind(&config.path_prefix_from)
+    .bind(&config.path_prefix_to)
     .execute(pool)
     .await?;
     Ok(())

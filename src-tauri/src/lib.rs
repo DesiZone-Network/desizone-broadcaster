@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod audio;
 pub mod commands;
 pub mod db;
@@ -9,6 +10,11 @@ pub mod stats;
 pub mod stream;
 
 use commands::{
+    analytics_commands::{
+        clear_event_log, export_report_csv, generate_report, get_event_log,
+        get_health_history, get_health_snapshot, get_hourly_heatmap, get_listener_graph,
+        get_listener_peak, get_song_play_history, get_top_songs,
+    },
     audio_commands::{
         get_deck_state, get_vu_readings, load_track, pause_deck, play_deck, seek_deck,
         set_channel_gain,
@@ -34,7 +40,14 @@ use commands::{
         start_mic, stop_mic, set_ptt,
         start_voice_recording, stop_voice_recording, save_voice_track,
     },
-    queue_commands::{add_to_queue, get_history, get_queue, remove_from_queue, search_songs},
+    queue_commands::{
+        add_to_queue, complete_queue_item, get_history, get_queue, remove_from_queue,
+        search_songs,
+    },
+    sam_db_commands::{
+        connect_sam_db, disconnect_sam_db, get_sam_categories, get_sam_db_config_cmd,
+        get_sam_db_status, save_sam_db_config_cmd, test_sam_db_connection,
+    },
     script_commands::{get_scripts, save_script, delete_script, run_script, get_script_log},
     stream_commands::{get_stream_status, start_stream, stop_stream},
 };
@@ -45,8 +58,66 @@ pub fn run() {
     let engine = audio::engine::AudioEngine::new()
         .expect("Failed to initialise audio engine");
 
-    let app_state = AppState::new(engine);
+    // ── Database initialisation ──────────────────────────────────────────────
+    //
+    // We need both DBs ready before commands start serving requests.
+    // Use a short-lived single-thread Tokio runtime for the async init work;
+    // Tauri will create its own multi-thread runtime afterward.
 
+    let app_data_dir = compute_app_data_dir();
+    std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
+    let db_path = format!("{app_data_dir}/app.db");
+
+    let (local_pool, sam_pool_opt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build init Tokio runtime")
+        .block_on(async {
+            // 1. SQLite (always required)
+            let local = db::local::init_db(&db_path)
+                .await
+                .expect("Failed to open local SQLite database");
+
+            // 2. SAM MySQL — attempt auto-connect if configured
+            let sam_opt = match db::local::load_sam_db_config_full(&local).await {
+                Ok(Some(cfg)) if cfg.config.auto_connect => {
+                    let enc_pw = urlencoding::encode(&cfg.password);
+                    let url = format!(
+                        "mysql://{}:{}@{}:{}/{}",
+                        cfg.config.username,
+                        enc_pw,
+                        cfg.config.host,
+                        cfg.config.port,
+                        cfg.config.database_name,
+                    );
+                    match db::sam::connect(&url).await {
+                        Ok(pool) => {
+                            eprintln!(
+                                "[startup] SAM DB auto-connected → {}:{}",
+                                cfg.config.host, cfg.config.database_name
+                            );
+                            Some(pool)
+                        }
+                        Err(e) => {
+                            // Non-fatal — app works without SAM DB
+                            eprintln!("[startup] SAM DB auto-connect failed (continuing): {e}");
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+
+            (local, sam_opt)
+        });
+
+    // ── AppState assembly ────────────────────────────────────────────────────
+    let mut app_state = AppState::new(engine).with_local_db(local_pool);
+    if let Some(pool) = sam_pool_opt {
+        app_state = app_state.with_sam_db(pool);
+    }
+
+    // ── Tauri app ────────────────────────────────────────────────────────────
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -79,6 +150,7 @@ pub fn run() {
             get_queue,
             add_to_queue,
             remove_from_queue,
+            complete_queue_item,
             search_songs,
             get_history,
             // Phase 1 — Single legacy stream
@@ -133,8 +205,53 @@ pub fn run() {
             start_live_talk,
             stop_live_talk,
             set_mix_minus,
+            // Phase 6 — SAM DB connection management
+            test_sam_db_connection,
+            connect_sam_db,
+            disconnect_sam_db,
+            get_sam_db_config_cmd,
+            save_sam_db_config_cmd,
+            get_sam_db_status,
+            get_sam_categories,
+            // Phase 7 — Analytics
+            get_top_songs,
+            get_hourly_heatmap,
+            get_song_play_history,
+            get_listener_graph,
+            get_listener_peak,
+            get_event_log,
+            clear_event_log,
+            get_health_snapshot,
+            get_health_history,
+            generate_report,
+            export_report_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Return the platform-specific application data directory.
+/// Mirrors what Tauri resolves for `PathResolver::app_data_dir()`.
+fn compute_app_data_dir() -> String {
+    const IDENTIFIER: &str = "com.minhaj.desizonebroadcaster";
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/Library/Application Support/{IDENTIFIER}")
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+        format!("{appdata}\\{IDENTIFIER}")
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{home}/.config/{IDENTIFIER}")
+    }
+}

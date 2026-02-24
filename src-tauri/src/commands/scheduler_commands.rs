@@ -91,7 +91,8 @@ pub async fn get_next_autodj_track(
     state: State<'_, AppState>,
 ) -> Result<Option<rotation::SongCandidate>, String> {
     let local_pool = state.local_db.as_ref().ok_or("Local DB not initialised")?;
-    let sam_pool = state.sam_db.as_ref().ok_or("SAM DB not connected")?;
+    let sam_guard = state.sam_db.read().await;
+    let sam_pool = sam_guard.as_ref().ok_or("SAM DB not connected")?;
     rotation::select_next_track(local_pool, sam_pool, None)
         .await
         .map_err(|e| e.to_string())

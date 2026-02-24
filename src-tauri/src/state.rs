@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use sqlx::{MySqlPool, SqlitePool};
+use tokio::sync::RwLock;
 
 use crate::{
+    analytics::health_monitor::HealthMonitor,
     audio::{
         engine::AudioEngine,
         mic_input::{MicConfig, MicInput},
@@ -23,7 +25,9 @@ use crate::{
 pub struct AppState {
     pub engine: Mutex<AudioEngine>,
     pub local_db: Option<SqlitePool>,
-    pub sam_db: Option<MySqlPool>,
+    /// SAM Broadcaster MySQL pool — wrapped in RwLock so commands can
+    /// connect/disconnect at runtime without restarting the app.
+    pub sam_db: Arc<RwLock<Option<MySqlPool>>>,
     /// Phase 1 legacy single-stream handle (kept for backward compat)
     pub stream_handle: Mutex<Option<StreamHandle>>,
     /// Phase 4 — multi-encoder manager
@@ -48,6 +52,8 @@ pub struct AppState {
     pub live_talk_active: Mutex<Option<String>>,
     /// Phase 6 — Mix-minus enabled
     pub mix_minus_enabled: Mutex<bool>,
+    /// Phase 7 — System health monitor
+    pub health_monitor: Arc<HealthMonitor>,
 }
 
 impl AppState {
@@ -59,7 +65,7 @@ impl AppState {
         Self {
             engine: Mutex::new(engine),
             local_db: None,
-            sam_db: None,
+            sam_db: Arc::new(RwLock::new(None)),
             stream_handle: Mutex::new(None),
             encoder_manager,
             broadcaster,
@@ -76,6 +82,7 @@ impl AppState {
             remote_dj_permissions: Mutex::new(HashMap::new()),
             live_talk_active: Mutex::new(None),
             mix_minus_enabled: Mutex::new(false),
+            health_monitor: Arc::new(HealthMonitor::new()),
         }
     }
 
@@ -84,8 +91,10 @@ impl AppState {
         self
     }
 
-    pub fn with_sam_db(mut self, pool: MySqlPool) -> Self {
-        self.sam_db = Some(pool);
+    pub fn with_sam_db(self, pool: MySqlPool) -> Self {
+        // We can't use `mut self` and then call blocking_write, but since this
+        // is called at construction time (no concurrent readers yet), it is fine.
+        *self.sam_db.blocking_write() = Some(pool);
         self
     }
 }

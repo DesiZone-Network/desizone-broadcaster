@@ -1,3 +1,4 @@
+pub mod analytics_commands;
 pub mod audio_commands;
 pub mod crossfade_commands;
 pub mod cue_commands;
@@ -6,6 +7,7 @@ pub mod encoder_commands;
 pub mod gateway_commands;
 pub mod mic_commands;
 pub mod queue_commands;
+pub mod sam_db_commands;
 pub mod scheduler_commands;
 pub mod script_commands;
 pub mod stream_commands;
