@@ -23,7 +23,12 @@ pub async fn set_cue_point(
     let pool = state.local_db.as_ref().ok_or("Local DB not initialised")?;
     crate::db::local::upsert_cue_point(
         pool,
-        &CuePoint { id: None, song_id, name, position_ms },
+        &CuePoint {
+            id: None,
+            song_id,
+            name,
+            position_ms,
+        },
     )
     .await
     .map_err(|e| format!("DB error: {e}"))

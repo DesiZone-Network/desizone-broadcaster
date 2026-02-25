@@ -1,15 +1,24 @@
 use tauri::State;
 
 use crate::{
-    audio::dsp::{
-        agc::AgcConfig,
-        eq::EqConfig,
-        pipeline::PipelineSettings,
-    },
+    audio::dsp::{agc::AgcConfig, eq::EqConfig, pipeline::PipelineSettings},
     state::AppState,
 };
 
 use super::audio_commands::parse_deck;
+
+enum ChannelTarget {
+    Deck(crate::audio::crossfade::DeckId),
+    Master,
+}
+
+fn parse_channel_target(channel: &str) -> Result<ChannelTarget, String> {
+    if channel == "master" {
+        Ok(ChannelTarget::Master)
+    } else {
+        Ok(ChannelTarget::Deck(parse_deck(channel)?))
+    }
+}
 
 #[tauri::command]
 pub async fn get_channel_dsp(
@@ -30,12 +39,12 @@ pub async fn set_channel_eq(
     high_gain_db: f32,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let deck_id = parse_deck(&channel)?;
+    let target = parse_channel_target(&channel)?;
     let mut settings = get_pipeline_settings(&channel, &state).await?;
     settings.eq.low_gain_db = low_gain_db;
     settings.eq.mid_gain_db = mid_gain_db;
     settings.eq.high_gain_db = high_gain_db;
-    apply_and_persist(deck_id, settings, &channel, &state).await
+    apply_and_persist(target, settings, &channel, &state).await
 }
 
 #[tauri::command]
@@ -46,12 +55,16 @@ pub async fn set_channel_agc(
     max_gain_db: Option<f32>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let deck_id = parse_deck(&channel)?;
+    let target = parse_channel_target(&channel)?;
     let mut settings = get_pipeline_settings(&channel, &state).await?;
     settings.agc.enabled = enabled;
-    if let Some(g) = gate_db { settings.agc.gate_db = g; }
-    if let Some(m) = max_gain_db { settings.agc.max_gain_db = m; }
-    apply_and_persist(deck_id, settings, &channel, &state).await
+    if let Some(g) = gate_db {
+        settings.agc.gate_db = g;
+    }
+    if let Some(m) = max_gain_db {
+        settings.agc.max_gain_db = m;
+    }
+    apply_and_persist(target, settings, &channel, &state).await
 }
 
 #[tauri::command]
@@ -60,8 +73,8 @@ pub async fn set_pipeline_settings(
     settings: PipelineSettings,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let deck_id = parse_deck(&channel)?;
-    apply_and_persist(deck_id, settings, &channel, &state).await
+    let target = parse_channel_target(&channel)?;
+    apply_and_persist(target, settings, &channel, &state).await
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -75,6 +88,11 @@ async fn get_pipeline_settings(
             .await
             .map_err(|e| format!("DB: {e}"))?
         {
+            if let Some(json) = &row.pipeline_settings_json {
+                if let Ok(settings) = serde_json::from_str::<PipelineSettings>(json) {
+                    return Ok(settings);
+                }
+            }
             return Ok(row_to_settings(&row));
         }
     }
@@ -82,13 +100,28 @@ async fn get_pipeline_settings(
 }
 
 async fn apply_and_persist(
-    deck_id: crate::audio::crossfade::DeckId,
+    target: ChannelTarget,
     settings: PipelineSettings,
     channel: &str,
     state: &AppState,
 ) -> Result<(), String> {
     // Apply to audio engine
-    state.engine.lock().unwrap().set_channel_pipeline(deck_id, settings.clone())?;
+    match target {
+        ChannelTarget::Deck(deck_id) => {
+            state
+                .engine
+                .lock()
+                .unwrap()
+                .set_channel_pipeline(deck_id, settings.clone())?;
+        }
+        ChannelTarget::Master => {
+            state
+                .engine
+                .lock()
+                .unwrap()
+                .set_master_pipeline(settings.clone())?;
+        }
+    }
 
     // Persist to SQLite
     if let Some(pool) = &state.local_db {
@@ -102,7 +135,7 @@ async fn apply_and_persist(
 
 fn row_to_settings(r: &crate::db::local::ChannelDspRow) -> PipelineSettings {
     use crate::audio::dsp::agc::PreEmphasis;
-    PipelineSettings {
+    let mut settings = PipelineSettings {
         eq: EqConfig {
             low_gain_db: r.eq_low_gain_db as f32,
             low_freq_hz: r.eq_low_freq_hz as f32,
@@ -126,7 +159,20 @@ fn row_to_settings(r: &crate::db::local::ChannelDspRow) -> PipelineSettings {
             },
         },
         ..Default::default()
+    };
+
+    if let Some(comp_json) = &r.comp_settings_json {
+        if let Ok(mut mb) =
+            serde_json::from_str::<crate::audio::dsp::compressor::MultibandConfig>(comp_json)
+        {
+            mb.enabled = r.comp_enabled;
+            settings.multiband = mb;
+        }
+    } else {
+        settings.multiband.enabled = r.comp_enabled;
     }
+
+    settings
 }
 
 fn settings_to_row(channel: String, s: &PipelineSettings) -> crate::db::local::ChannelDspRow {
@@ -151,5 +197,6 @@ fn settings_to_row(channel: String, s: &PipelineSettings) -> crate::db::local::C
         },
         comp_enabled: s.multiband.enabled,
         comp_settings_json: serde_json::to_string(&s.multiband).ok(),
+        pipeline_settings_json: serde_json::to_string(s).ok(),
     }
 }

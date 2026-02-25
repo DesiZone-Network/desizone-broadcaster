@@ -16,8 +16,15 @@ import {
     arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, Trash2, Music2, Clock } from "lucide-react";
-import { getQueue, removeFromQueue, QueueEntry, SamSong } from "../../lib/bridge";
+import { GripVertical, Trash2, Music2, Clock, Plus } from "lucide-react";
+import {
+    enqueueNextClockwheelTrack,
+    getQueue,
+    onDeckStateChanged,
+    removeFromQueue,
+    QueueEntry,
+    SamSong,
+} from "../../lib/bridge";
 
 interface QueueItem extends QueueEntry {
     song?: SamSong;
@@ -41,7 +48,7 @@ function SortableQueueRow({
     onRemove: (id: number) => void;
 }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-        useSortable({ id: item.queueid ?? index });
+        useSortable({ id: item.id ?? index });
 
     return (
         <div
@@ -86,7 +93,7 @@ function SortableQueueRow({
                         whiteSpace: "nowrap",
                     }}
                 >
-                    {item.song?.title ?? `Song #${item.songid}`}
+                    {item.song?.title ?? `Song #${item.song_id}`}
                 </div>
                 <div
                     className="text-muted"
@@ -105,7 +112,7 @@ function SortableQueueRow({
                 <button
                     className="btn btn-ghost btn-icon"
                     style={{ width: 22, height: 22, opacity: 0.4 }}
-                    onClick={() => item.queueid != null && onRemove(item.queueid)}
+                    onClick={() => item.id != null && onRemove(item.id)}
                     title="Remove from queue"
                 >
                     <Trash2 size={11} />
@@ -118,6 +125,7 @@ function SortableQueueRow({
 export function QueuePanel() {
     const [items, setItems] = useState<QueueItem[]>([]);
     const [loading, setLoading] = useState(false);
+    const [adding, setAdding] = useState(false);
 
     const sensors = useSensors(
         useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -138,16 +146,26 @@ export function QueuePanel() {
 
     useEffect(() => {
         loadQueue();
-        const id = setInterval(loadQueue, 10000);
-        return () => clearInterval(id);
+        const id = setInterval(loadQueue, 2000);
+        const unsub = onDeckStateChanged((e) => {
+            if (e.deck === "deck_a" || e.deck === "deck_b") {
+                if (e.state === "ready" || e.state === "playing" || e.state === "idle") {
+                    loadQueue();
+                }
+            }
+        });
+        return () => {
+            clearInterval(id);
+            unsub.then((f) => f());
+        };
     }, [loadQueue]);
 
     const handleDragEnd = (event: DragEndEvent) => {
         const { active, over } = event;
         if (over && active.id !== over.id) {
             setItems((prev) => {
-                const oldIdx = prev.findIndex((i) => (i.queueid ?? 0) === active.id);
-                const newIdx = prev.findIndex((i) => (i.queueid ?? 0) === over.id);
+                const oldIdx = prev.findIndex((i) => (i.id ?? 0) === active.id);
+                const newIdx = prev.findIndex((i) => (i.id ?? 0) === over.id);
                 return arrayMove(prev, oldIdx, newIdx);
             });
         }
@@ -156,9 +174,21 @@ export function QueuePanel() {
     const handleRemove = async (queueId: number) => {
         try {
             await removeFromQueue(queueId);
-            setItems((prev) => prev.filter((i) => i.queueid !== queueId));
+            setItems((prev) => prev.filter((i) => i.id !== queueId));
         } catch (e) {
             console.error(e);
+        }
+    };
+
+    const handleAutoAdd = async () => {
+        setAdding(true);
+        try {
+            await enqueueNextClockwheelTrack();
+            await loadQueue();
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setAdding(false);
         }
     };
 
@@ -187,6 +217,15 @@ export function QueuePanel() {
                             <span style={{ fontSize: 10 }}>{formatDuration(totalDuration)}</span>
                         </div>
                     )}
+                    <button
+                        className="btn btn-ghost btn-icon"
+                        style={{ width: 24, height: 24 }}
+                        onClick={handleAutoAdd}
+                        disabled={adding}
+                        title="Auto-add one song from clockwheel rotation"
+                    >
+                        <Plus size={12} />
+                    </button>
                     <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 8px" }} onClick={loadQueue}>
                         Refresh
                     </button>
@@ -217,12 +256,12 @@ export function QueuePanel() {
                         onDragEnd={handleDragEnd}
                     >
                         <SortableContext
-                            items={items.map((i, idx) => i.queueid ?? idx)}
+                            items={items.map((i, idx) => i.id ?? idx)}
                             strategy={verticalListSortingStrategy}
                         >
                             {items.map((item, idx) => (
                                 <SortableQueueRow
-                                    key={item.queueid ?? idx}
+                                    key={item.id ?? idx}
                                     item={item}
                                     index={idx}
                                     isNowPlaying={idx === 0}

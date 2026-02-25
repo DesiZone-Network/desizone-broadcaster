@@ -73,7 +73,11 @@ impl FadeCurve {
         (0..=steps)
             .map(|i| {
                 let t = i as f32 / steps as f32;
-                CurvePoint { t, gain_out: self.apply(t), gain_in: self.apply_incoming(t) }
+                CurvePoint {
+                    t,
+                    gain_out: self.apply(t),
+                    gain_in: self.apply_incoming(t),
+                }
             })
             .collect()
     }
@@ -89,15 +93,10 @@ pub struct CurvePoint {
 
 // ── CrossfadeMode ─────────────────────────────────────────────────────────────
 
-/// How the crossfade is triggered or positioned.
-///
-/// This covers both the *overlap style* used by the real-time engine and the
-/// *trigger mode* used by the crossfade state machine.
+/// How deck A and B are blended during a transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossfadeMode {
-    // ── Overlap style (used by the real-time state machine) ───────────────
-
     /// Both tracks play simultaneously during the overlap window (SAM default).
     #[default]
     Overlap,
@@ -105,15 +104,24 @@ pub enum CrossfadeMode {
     Segue,
     /// Hard cut — no fade applied.
     Instant,
-
-    // ── Trigger mode (used by the high-level state machine) ───────────────
-
-    /// Crossfade is triggered when the outgoing track's RMS drops below the
-    /// `auto_detect_db` threshold.
+    /// Legacy serialized value kept for backward compatibility.
     AutoDetect,
-    /// Crossfade is triggered at `(track_duration − fixed_crossfade_ms)` ms.
+    /// Legacy serialized value kept for backward compatibility.
     Fixed,
-    /// Crossfade is triggered explicitly by the user or an external script.
+    /// Legacy serialized value kept for backward compatibility.
+    Manual,
+}
+
+/// SAM-style transition trigger policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossfadeTriggerMode {
+    /// Trigger when outgoing RMS falls below `auto_detect_db`.
+    #[default]
+    AutoDetectDb,
+    /// Trigger when outgoing remaining time <= `fixed_crossfade_point_ms`.
+    FixedPointMs,
+    /// Manual trigger only.
     Manual,
 }
 
@@ -139,12 +147,14 @@ pub struct CrossfadeConfig {
     /// Maximum incoming level at the end of the fade (0–100 %).
     pub fade_in_level_pct: u8,
 
-    // ── Cross-fade trigger ────────────────────────────────────────────────
+    // ── Blend style ───────────────────────────────────────────────────────
     pub crossfade_mode: CrossfadeMode,
-    /// Used when `crossfade_mode == Fixed`: begin fade this many ms before
-    /// the track end.
+    // ── Cross-fade trigger ────────────────────────────────────────────────
+    pub trigger_mode: CrossfadeTriggerMode,
+    /// Legacy field kept for backward compatibility with older payloads.
+    /// No longer used for trigger decisions.
     pub fixed_crossfade_ms: u32,
-    /// Used when `crossfade_mode == AutoDetect`: trigger threshold in dBFS.
+    /// Trigger threshold in dBFS for `trigger_mode = auto_detect_db`.
     /// Typical value: −3.0.
     pub auto_detect_db: f32,
     /// Minimum crossfade duration that will be applied (ms).
@@ -156,7 +166,7 @@ pub struct CrossfadeConfig {
     pub skip_short_tracks_secs: Option<u32>,
 
     // ── Legacy auto-detect fields (kept for engine.rs compatibility) ──────
-    /// Master switch for the auto-detect trigger.
+    /// Master switch for auto detect legacy paths.
     pub auto_detect_enabled: bool,
     /// Minimum ms from track start before auto-detect is allowed to fire.
     pub auto_detect_min_ms: u32,
@@ -173,28 +183,29 @@ impl Default for CrossfadeConfig {
             // Fade out — SAM defaults
             fade_out_enabled: true,
             fade_out_curve: FadeCurve::Exponential,
-            fade_out_time_ms: 3000,
+            fade_out_time_ms: 10000,
             fade_out_level_pct: 80,
 
             // Fade in — SAM defaults
             fade_in_enabled: true,
             fade_in_curve: FadeCurve::SCurve,
-            fade_in_time_ms: 3000,
-            fade_in_level_pct: 100,
+            fade_in_time_ms: 10000,
+            fade_in_level_pct: 80,
 
             // Cross-fade trigger
-            crossfade_mode: CrossfadeMode::AutoDetect,
+            crossfade_mode: CrossfadeMode::Overlap,
+            trigger_mode: CrossfadeTriggerMode::AutoDetectDb,
             fixed_crossfade_ms: 8000,
             auto_detect_db: -3.0,
             min_fade_time_ms: 3000,
             max_fade_time_ms: 10000,
-            skip_short_tracks_secs: Some(30),
+            skip_short_tracks_secs: Some(65),
 
             // Legacy engine fields
             auto_detect_enabled: true,
             auto_detect_min_ms: 500,
             auto_detect_max_ms: 15000,
-            fixed_crossfade_point_ms: None,
+            fixed_crossfade_point_ms: Some(8000),
         }
     }
 }
@@ -242,6 +253,7 @@ pub enum DeckId {
     DeckB,
     SoundFx,
     Aux1,
+    Aux2,
     VoiceFx,
 }
 
@@ -252,6 +264,7 @@ impl std::fmt::Display for DeckId {
             DeckId::DeckB => write!(f, "deck_b"),
             DeckId::SoundFx => write!(f, "sound_fx"),
             DeckId::Aux1 => write!(f, "aux_1"),
+            DeckId::Aux2 => write!(f, "aux_2"),
             DeckId::VoiceFx => write!(f, "voice_fx"),
         }
     }
@@ -296,7 +309,9 @@ impl CrossfadeState {
         sample_rate: u32,
     ) -> Self {
         if config.crossfade_mode == CrossfadeMode::Instant {
-            return CrossfadeState::Complete { new_active: incoming };
+            return CrossfadeState::Complete {
+                new_active: incoming,
+            };
         }
 
         // Use the longer of the two fade times, clamped to [min, max].
@@ -308,7 +323,9 @@ impl CrossfadeState {
         let total_samples = (window_ms as u64 * sample_rate as u64) / 1000;
 
         if total_samples == 0 {
-            return CrossfadeState::Complete { new_active: incoming };
+            return CrossfadeState::Complete {
+                new_active: incoming,
+            };
         }
 
         CrossfadeState::Fading {
@@ -337,9 +354,9 @@ impl CrossfadeState {
                 config,
                 ..
             } => {
-                *elapsed_samples = (*elapsed_samples + frames).min(*total_samples);
-                *progress = *elapsed_samples as f32 / *total_samples as f32;
-                let t = *progress;
+                // Use progress at the start of this callback for gain evaluation,
+                // then advance counters. This avoids a first-block gain jump.
+                let t = (*elapsed_samples as f32 / *total_samples as f32).clamp(0.0, 1.0);
 
                 let out_scale = config.fade_out_level_pct as f32 / 100.0;
                 let in_scale = config.fade_in_level_pct as f32 / 100.0;
@@ -354,6 +371,9 @@ impl CrossfadeState {
                 } else {
                     1.0
                 };
+
+                *elapsed_samples = (*elapsed_samples + frames).min(*total_samples);
+                *progress = *elapsed_samples as f32 / *total_samples as f32;
 
                 if *elapsed_samples >= *total_samples {
                     let new_active = *incoming;
@@ -446,7 +466,10 @@ pub struct CrossfadeStateMachine {
 impl CrossfadeStateMachine {
     /// Create a new state machine in the `Idle` phase.
     pub fn new(config: CrossfadeConfig) -> Self {
-        Self { phase: CrossfadePhase::Idle, config }
+        Self {
+            phase: CrossfadePhase::Idle,
+            config,
+        }
     }
 
     /// Start a crossfade from `outgoing_deck` to `incoming_deck`.
@@ -545,7 +568,11 @@ impl CrossfadeStateMachine {
             .map(|i| {
                 let t = i as f32 / last;
                 let t_clamped = t.clamp(0.0, 1.0);
-                (t_clamped, curve_out.apply(t_clamped), curve_in.apply_incoming(t_clamped))
+                (
+                    t_clamped,
+                    curve_out.apply(t_clamped),
+                    curve_in.apply_incoming(t_clamped),
+                )
             })
             .collect()
     }
@@ -562,38 +589,89 @@ mod tests {
     #[test]
     fn linear_gain_boundaries() {
         let c = FadeCurve::Linear;
-        assert!((c.apply(0.0) - 1.0).abs() < 1e-6, "linear out t=0 should be 1.0");
-        assert!((c.apply(1.0) - 0.0).abs() < 1e-6, "linear out t=1 should be 0.0");
-        assert!((c.apply_incoming(0.0) - 0.0).abs() < 1e-6, "linear in t=0 should be 0.0");
-        assert!((c.apply_incoming(1.0) - 1.0).abs() < 1e-6, "linear in t=1 should be 1.0");
+        assert!(
+            (c.apply(0.0) - 1.0).abs() < 1e-6,
+            "linear out t=0 should be 1.0"
+        );
+        assert!(
+            (c.apply(1.0) - 0.0).abs() < 1e-6,
+            "linear out t=1 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(0.0) - 0.0).abs() < 1e-6,
+            "linear in t=0 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(1.0) - 1.0).abs() < 1e-6,
+            "linear in t=1 should be 1.0"
+        );
     }
 
     #[test]
     fn exponential_gain_boundaries() {
         let c = FadeCurve::Exponential;
-        assert!((c.apply(0.0) - 1.0).abs() < 1e-6, "exp out t=0 should be 1.0");
-        assert!((c.apply(1.0) - 0.0).abs() < 1e-6, "exp out t=1 should be 0.0");
-        assert!((c.apply_incoming(0.0) - 0.0).abs() < 1e-6, "exp in t=0 should be 0.0");
-        assert!((c.apply_incoming(1.0) - 1.0).abs() < 1e-6, "exp in t=1 should be 1.0");
+        assert!(
+            (c.apply(0.0) - 1.0).abs() < 1e-6,
+            "exp out t=0 should be 1.0"
+        );
+        assert!(
+            (c.apply(1.0) - 0.0).abs() < 1e-6,
+            "exp out t=1 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(0.0) - 0.0).abs() < 1e-6,
+            "exp in t=0 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(1.0) - 1.0).abs() < 1e-6,
+            "exp in t=1 should be 1.0"
+        );
     }
 
     #[test]
     fn scurve_gain_boundaries() {
         let c = FadeCurve::SCurve;
-        assert!((c.apply(0.0) - 1.0).abs() < 1e-6, "scurve out t=0 should be 1.0");
-        assert!((c.apply(1.0) - 0.0).abs() < 1e-6, "scurve out t=1 should be 0.0");
-        assert!((c.apply(0.5) - 0.5).abs() < 1e-5, "scurve out t=0.5 should be 0.5");
-        assert!((c.apply_incoming(0.0) - 0.0).abs() < 1e-6, "scurve in t=0 should be 0.0");
-        assert!((c.apply_incoming(1.0) - 1.0).abs() < 1e-6, "scurve in t=1 should be 1.0");
+        assert!(
+            (c.apply(0.0) - 1.0).abs() < 1e-6,
+            "scurve out t=0 should be 1.0"
+        );
+        assert!(
+            (c.apply(1.0) - 0.0).abs() < 1e-6,
+            "scurve out t=1 should be 0.0"
+        );
+        assert!(
+            (c.apply(0.5) - 0.5).abs() < 1e-5,
+            "scurve out t=0.5 should be 0.5"
+        );
+        assert!(
+            (c.apply_incoming(0.0) - 0.0).abs() < 1e-6,
+            "scurve in t=0 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(1.0) - 1.0).abs() < 1e-6,
+            "scurve in t=1 should be 1.0"
+        );
     }
 
     #[test]
     fn logarithmic_gain_boundaries() {
         let c = FadeCurve::Logarithmic;
-        assert!((c.apply(0.0) - 1.0).abs() < 1e-5, "log out t=0 should be 1.0");
-        assert!((c.apply(1.0) - 0.0).abs() < 1e-5, "log out t=1 should be 0.0");
-        assert!((c.apply_incoming(0.0) - 0.0).abs() < 1e-5, "log in t=0 should be 0.0");
-        assert!((c.apply_incoming(1.0) - 1.0).abs() < 1e-5, "log in t=1 should be 1.0");
+        assert!(
+            (c.apply(0.0) - 1.0).abs() < 1e-5,
+            "log out t=0 should be 1.0"
+        );
+        assert!(
+            (c.apply(1.0) - 0.0).abs() < 1e-5,
+            "log out t=1 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(0.0) - 0.0).abs() < 1e-5,
+            "log in t=0 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(1.0) - 1.0).abs() < 1e-5,
+            "log in t=1 should be 1.0"
+        );
     }
 
     #[test]
@@ -615,10 +693,22 @@ mod tests {
     #[test]
     fn constant_power_boundaries() {
         let c = FadeCurve::ConstantPower;
-        assert!((c.apply(0.0) - 1.0).abs() < 1e-6, "cp out t=0 should be 1.0");
-        assert!((c.apply(1.0) - 0.0).abs() < 1e-6, "cp out t=1 should be 0.0");
-        assert!((c.apply_incoming(0.0) - 0.0).abs() < 1e-6, "cp in t=0 should be 0.0");
-        assert!((c.apply_incoming(1.0) - 1.0).abs() < 1e-6, "cp in t=1 should be 1.0");
+        assert!(
+            (c.apply(0.0) - 1.0).abs() < 1e-6,
+            "cp out t=0 should be 1.0"
+        );
+        assert!(
+            (c.apply(1.0) - 0.0).abs() < 1e-6,
+            "cp out t=1 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(0.0) - 0.0).abs() < 1e-6,
+            "cp in t=0 should be 0.0"
+        );
+        assert!(
+            (c.apply_incoming(1.0) - 1.0).abs() < 1e-6,
+            "cp in t=1 should be 1.0"
+        );
     }
 
     #[test]
@@ -660,14 +750,18 @@ mod tests {
 
     #[test]
     fn state_machine_advances_to_complete() {
-        let config = CrossfadeConfig::default();
+        let mut config = CrossfadeConfig::default();
+        config.fade_out_time_ms = 1000;
+        config.fade_in_time_ms = 1000;
+        config.min_fade_time_ms = 1000;
+        config.max_fade_time_ms = 1000;
         let sample_rate = 44100_u32;
         let mut state = CrossfadeState::start(DeckId::DeckA, DeckId::DeckB, config, sample_rate);
 
         assert!(state.is_fading());
 
         // Advance by the full fade window in one shot.
-        let window_ms = 3000_u64; // default min_fade_time_ms
+        let window_ms = 1000_u64;
         let total_samples = window_ms * sample_rate as u64 / 1000;
         let (gain_out, gain_in, complete) = state.advance(total_samples);
 
@@ -675,6 +769,78 @@ mod tests {
         assert!((gain_out - 0.0).abs() < 1e-6, "outgoing gain should be 0");
         assert!((gain_in - 1.0).abs() < 1e-6, "incoming gain should be 1");
         assert!(state.is_complete());
+    }
+
+    #[test]
+    fn state_machine_first_step_starts_from_zero_progress() {
+        let config = CrossfadeConfig::default();
+        let sample_rate = 44100_u32;
+        let mut state = CrossfadeState::start(DeckId::DeckA, DeckId::DeckB, config, sample_rate);
+        let (gain_out, gain_in, complete) = state.advance(1);
+
+        assert!(!complete);
+        // Defaults: fade_out_level=80%, fade_in_level=100%.
+        assert!(
+            (gain_out - 0.8).abs() < 1e-4,
+            "expected outgoing gain to start near 0.8"
+        );
+        assert!(gain_in <= 1e-4, "expected incoming gain to start near 0.0");
+    }
+
+    #[test]
+    fn state_machine_direction_is_symmetric() {
+        let config = CrossfadeConfig::default();
+        let sample_rate = 44100_u32;
+        let mut a_to_b =
+            CrossfadeState::start(DeckId::DeckA, DeckId::DeckB, config.clone(), sample_rate);
+        let mut b_to_a = CrossfadeState::start(DeckId::DeckB, DeckId::DeckA, config, sample_rate);
+
+        for _ in 0..10 {
+            let (out_ab, in_ab, done_ab) = a_to_b.advance(512);
+            let (out_ba, in_ba, done_ba) = b_to_a.advance(512);
+            assert!(
+                (out_ab - out_ba).abs() < 1e-6,
+                "outgoing gain must match across directions"
+            );
+            assert!(
+                (in_ab - in_ba).abs() < 1e-6,
+                "incoming gain must match across directions"
+            );
+            assert_eq!(
+                done_ab, done_ba,
+                "completion parity must match across directions"
+            );
+        }
+    }
+
+    #[test]
+    fn state_machine_direction_stress_long_run() {
+        let mut config = CrossfadeConfig::default();
+        config.fade_out_time_ms = 4000;
+        config.fade_in_time_ms = 4000;
+        config.min_fade_time_ms = 1000;
+        config.max_fade_time_ms = 10000;
+        let sample_rate = 44100_u32;
+        let mut a_to_b =
+            CrossfadeState::start(DeckId::DeckA, DeckId::DeckB, config.clone(), sample_rate);
+        let mut b_to_a = CrossfadeState::start(DeckId::DeckB, DeckId::DeckA, config, sample_rate);
+
+        let mut done_ab = false;
+        let mut done_ba = false;
+        for _ in 0..500 {
+            let (out_ab, in_ab, complete_ab) = a_to_b.advance(512);
+            let (out_ba, in_ba, complete_ba) = b_to_a.advance(512);
+            assert!((out_ab - out_ba).abs() < 1e-6);
+            assert!((in_ab - in_ba).abs() < 1e-6);
+            assert_eq!(complete_ab, complete_ba);
+            done_ab = complete_ab;
+            done_ba = complete_ba;
+            if complete_ab && complete_ba {
+                break;
+            }
+        }
+
+        assert!(done_ab && done_ba, "both directions should complete");
     }
 
     #[test]
@@ -696,7 +862,9 @@ mod tests {
 
     #[test]
     fn complete_state_returns_full_in_gain() {
-        let mut state = CrossfadeState::Complete { new_active: DeckId::DeckB };
+        let mut state = CrossfadeState::Complete {
+            new_active: DeckId::DeckB,
+        };
         let (gain_out, gain_in, complete) = state.advance(1024);
         assert!((gain_out - 0.0).abs() < 1e-6);
         assert!((gain_in - 1.0).abs() < 1e-6);
@@ -717,7 +885,11 @@ mod tests {
 
     #[test]
     fn state_machine_advance_returns_none_at_end() {
-        let config = CrossfadeConfig::default();
+        let mut config = CrossfadeConfig::default();
+        config.fade_out_time_ms = 1000;
+        config.fade_in_time_ms = 1000;
+        config.min_fade_time_ms = 1000;
+        config.max_fade_time_ms = 1000;
         let mut machine = CrossfadeStateMachine::new(config);
         machine.start(0, 1, 44100);
 
@@ -725,8 +897,8 @@ mod tests {
 
         // Advance until complete.
         let mut last = None;
-        for _ in 0..(44100 * 10 + 1) {
-            // max 10 s safety bound
+        for _ in 0..(44100 * 2 + 1) {
+            // 2 s safety bound for a 1 s fade
             last = machine.advance();
             if last.is_none() {
                 break;
@@ -747,8 +919,14 @@ mod tests {
 
         for _ in 0..1000 {
             if let Some((out, inp)) = machine.advance() {
-                assert!(out >= 0.0 && out <= 1.0, "outgoing gain out of range: {out}");
-                assert!(inp >= 0.0 && inp <= 1.0, "incoming gain out of range: {inp}");
+                assert!(
+                    out >= 0.0 && out <= 1.0,
+                    "outgoing gain out of range: {out}"
+                );
+                assert!(
+                    inp >= 0.0 && inp <= 1.0,
+                    "incoming gain out of range: {inp}"
+                );
             } else {
                 break;
             }
@@ -761,7 +939,10 @@ mod tests {
         let machine = CrossfadeStateMachine::new(config);
         assert!(machine.should_auto_trigger(-10.0), "-10 dB should trigger");
         assert!(machine.should_auto_trigger(-3.1), "-3.1 dB should trigger");
-        assert!(!machine.should_auto_trigger(-3.0), "-3.0 dB exactly should not trigger");
+        assert!(
+            !machine.should_auto_trigger(-3.0),
+            "-3.0 dB exactly should not trigger"
+        );
         assert!(!machine.should_auto_trigger(0.0), "0 dB should not trigger");
     }
 
@@ -772,11 +953,23 @@ mod tests {
         let (t0, out0, in0) = points[0];
         let (t1, out1, in1) = points[10];
         assert!((t0 - 0.0).abs() < 1e-6);
-        assert!((out0 - 1.0).abs() < 1e-5, "out at t=0 should be 1.0, got {out0}");
-        assert!((in0 - 0.0).abs() < 1e-5, "in at t=0 should be 0.0, got {in0}");
+        assert!(
+            (out0 - 1.0).abs() < 1e-5,
+            "out at t=0 should be 1.0, got {out0}"
+        );
+        assert!(
+            (in0 - 0.0).abs() < 1e-5,
+            "in at t=0 should be 0.0, got {in0}"
+        );
         assert!((t1 - 1.0).abs() < 1e-6);
-        assert!((out1 - 0.0).abs() < 1e-5, "out at t=1 should be 0.0, got {out1}");
-        assert!((in1 - 1.0).abs() < 1e-5, "in at t=1 should be 1.0, got {in1}");
+        assert!(
+            (out1 - 0.0).abs() < 1e-5,
+            "out at t=1 should be 0.0, got {out1}"
+        );
+        assert!(
+            (in1 - 1.0).abs() < 1e-5,
+            "in at t=1 should be 1.0, got {in1}"
+        );
     }
 
     #[test]
@@ -806,17 +999,19 @@ mod tests {
         let cfg = CrossfadeConfig::default();
         assert!(cfg.fade_out_enabled);
         assert_eq!(cfg.fade_out_curve, FadeCurve::Exponential);
-        assert_eq!(cfg.fade_out_time_ms, 3000);
+        assert_eq!(cfg.fade_out_time_ms, 10000);
         assert_eq!(cfg.fade_out_level_pct, 80);
         assert!(cfg.fade_in_enabled);
         assert_eq!(cfg.fade_in_curve, FadeCurve::SCurve);
-        assert_eq!(cfg.fade_in_time_ms, 3000);
-        assert_eq!(cfg.fade_in_level_pct, 100);
-        assert_eq!(cfg.crossfade_mode, CrossfadeMode::AutoDetect);
+        assert_eq!(cfg.fade_in_time_ms, 10000);
+        assert_eq!(cfg.fade_in_level_pct, 80);
+        assert_eq!(cfg.crossfade_mode, CrossfadeMode::Overlap);
+        assert_eq!(cfg.trigger_mode, CrossfadeTriggerMode::AutoDetectDb);
         assert_eq!(cfg.fixed_crossfade_ms, 8000);
         assert!((cfg.auto_detect_db - (-3.0)).abs() < 1e-6);
         assert_eq!(cfg.min_fade_time_ms, 3000);
         assert_eq!(cfg.max_fade_time_ms, 10000);
-        assert_eq!(cfg.skip_short_tracks_secs, Some(30));
+        assert_eq!(cfg.skip_short_tracks_secs, Some(65));
+        assert_eq!(cfg.fixed_crossfade_point_ms, Some(8000));
     }
 }

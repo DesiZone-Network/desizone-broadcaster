@@ -3,8 +3,17 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Select from "@radix-ui/react-select";
 import { X, ChevronDown, RotateCcw } from "lucide-react";
 import {
-    getCrossfadeConfig, setCrossfadeConfig,
-    CrossfadeConfig, FadeCurve,
+    AutodjTransitionEngine,
+    getAutoDjTransitionConfig,
+    getCrossfadeConfig,
+    setAutoDjTransitionConfig,
+    setCrossfadeConfig,
+    recalculateAutoDjPlanNow,
+    AutoTransitionConfig,
+    AutoTransitionMode,
+    CrossfadeConfig,
+    CrossfadeTriggerMode,
+    FadeCurve,
 } from "../../lib/bridge";
 import { FadeCurveGraph } from "./FadeCurveGraph";
 
@@ -20,16 +29,52 @@ const DEFAULT_CONFIG: CrossfadeConfig = {
     fade_out_enabled: true,
     fade_out_curve: "exponential",
     fade_out_time_ms: 10000,
+    fade_out_level_pct: 80,
     fade_in_enabled: true,
     fade_in_curve: "s_curve",
     fade_in_time_ms: 10000,
+    fade_in_level_pct: 80,
     crossfade_mode: "overlap",
+    trigger_mode: "auto_detect_db",
+    fixed_crossfade_ms: 8000,
     auto_detect_enabled: true,
     auto_detect_db: -3,
-    auto_detect_min_ms: 3000,
-    auto_detect_max_ms: 10000,
+    min_fade_time_ms: 3000,
+    max_fade_time_ms: 10000,
+    skip_short_tracks_secs: 65,
+    auto_detect_min_ms: 500,
+    auto_detect_max_ms: 15000,
     fixed_crossfade_point_ms: 8000,
 };
+
+const DEFAULT_AUTO_TRANSITION: AutoTransitionConfig = {
+    engine: "sam_classic",
+    mixxx_planner_config: {
+        enabled: true,
+        mode: "full_intro_outro",
+        transition_time_sec: 10,
+        min_track_duration_ms: 200,
+    },
+};
+
+const AUTO_MODES: { value: AutoTransitionMode; label: string }[] = [
+    { value: "full_intro_outro", label: "Full Intro + Outro" },
+    { value: "fade_at_outro_start", label: "Fade At Outro Start" },
+    { value: "fixed_full_track", label: "Full Track" },
+    { value: "fixed_skip_silence", label: "Skip Silence" },
+    { value: "fixed_start_center_skip_silence", label: "Skip Silence Start Full Volume" },
+];
+
+const TRIGGER_MODES: { value: CrossfadeTriggerMode; label: string }[] = [
+    { value: "auto_detect_db", label: "Auto detect (dB level)" },
+    { value: "fixed_point_ms", label: "Fixed cross-fade point" },
+    { value: "manual", label: "Manual" },
+];
+
+const AUTODJ_ENGINES: { value: AutodjTransitionEngine; label: string }[] = [
+    { value: "sam_classic", label: "SAM Classic (Default)" },
+    { value: "mixxx_planner", label: "Mixxx Planner (Advanced)" },
+];
 
 function StyledSlider({
     value, min, max, step = 1, onChange, label, unit = "ms",
@@ -113,13 +158,17 @@ interface Props {
 
 export function CrossfadeSettingsDialog({ trigger }: Props) {
     const [config, setConfig] = useState<CrossfadeConfig>(DEFAULT_CONFIG);
+    const [autoTransition, setAutoTransition] = useState<AutoTransitionConfig>(DEFAULT_AUTO_TRANSITION);
     const [open, setOpen] = useState(false);
     const [saving, setSaving] = useState(false);
 
     useEffect(() => {
         if (open) {
-            getCrossfadeConfig()
-                .then(setConfig)
+            Promise.all([getCrossfadeConfig(), getAutoDjTransitionConfig()])
+                .then(([crossfadeCfg, autoCfg]) => {
+                    setConfig(crossfadeCfg);
+                    setAutoTransition(autoCfg);
+                })
                 .catch(() => { }); // use defaults on error
         }
     }, [open]);
@@ -131,7 +180,11 @@ export function CrossfadeSettingsDialog({ trigger }: Props) {
     const handleSave = async () => {
         setSaving(true);
         try {
-            await setCrossfadeConfig(config);
+            await Promise.all([
+                setCrossfadeConfig(config),
+                setAutoDjTransitionConfig(autoTransition),
+            ]);
+            await recalculateAutoDjPlanNow();
             setOpen(false);
         } catch (e) {
             console.error("Failed to save crossfade config:", e);
@@ -140,7 +193,10 @@ export function CrossfadeSettingsDialog({ trigger }: Props) {
         }
     };
 
-    const handleReset = () => setConfig(DEFAULT_CONFIG);
+    const handleReset = () => {
+        setConfig(DEFAULT_CONFIG);
+        setAutoTransition(DEFAULT_AUTO_TRANSITION);
+    };
 
     return (
         <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -260,7 +316,7 @@ export function CrossfadeSettingsDialog({ trigger }: Props) {
                         <div className="section-label" style={{ marginBottom: 10 }}>Cross-fade</div>
 
                         <div className="flex items-center gap-3 form-row">
-                            <span className="form-label">Mode</span>
+                            <span className="form-label">Blend</span>
                             <Select.Root
                                 value={config.crossfade_mode}
                                 onValueChange={(v) => update("crossfade_mode", v as CrossfadeConfig["crossfade_mode"])}
@@ -273,8 +329,8 @@ export function CrossfadeSettingsDialog({ trigger }: Props) {
                                     <Select.Content className="select-content" position="popper" sideOffset={4}>
                                         <Select.Viewport>
                                             {[
-                                                { value: "overlap", label: "Auto detect (dB level)" },
-                                                { value: "segue", label: "Fixed crossfade point" },
+                                                { value: "overlap", label: "Overlap" },
+                                                { value: "segue", label: "Segue" },
                                                 { value: "instant", label: "Instant cut" },
                                             ].map((m) => (
                                                 <Select.Item key={m.value} value={m.value} className="select-item">
@@ -287,51 +343,225 @@ export function CrossfadeSettingsDialog({ trigger }: Props) {
                             </Select.Root>
                         </div>
 
-                        {config.crossfade_mode === "overlap" && (
-                            <div style={{ marginTop: 6 }}>
-                                <StyledSlider
-                                    label="Trigger at"
-                                    value={config.auto_detect_db}
-                                    min={-30}
-                                    max={0}
-                                    step={0.5}
-                                    onChange={(v) => update("auto_detect_db", v)}
-                                    unit="dB"
-                                />
-                                <div style={{ marginTop: 6 }}>
-                                    <StyledSlider
-                                        label="Min fade time"
-                                        value={config.auto_detect_min_ms}
-                                        min={500}
-                                        max={10000}
-                                        step={500}
-                                        onChange={(v) => update("auto_detect_min_ms", v)}
-                                    />
-                                </div>
-                                <div style={{ marginTop: 6 }}>
-                                    <StyledSlider
-                                        label="Max fade time"
-                                        value={config.auto_detect_max_ms}
-                                        min={1000}
-                                        max={20000}
-                                        step={500}
-                                        onChange={(v) => update("auto_detect_max_ms", v)}
-                                    />
-                                </div>
-                            </div>
-                        )}
+                        <div className="flex items-center gap-3 form-row" style={{ marginTop: 8 }}>
+                            <span className="form-label">Trigger</span>
+                            <Select.Root
+                                value={config.trigger_mode}
+                                onValueChange={(v) => update("trigger_mode", v as CrossfadeTriggerMode)}
+                            >
+                                <Select.Trigger className="select-trigger">
+                                    <Select.Value />
+                                    <ChevronDown size={12} />
+                                </Select.Trigger>
+                                <Select.Portal>
+                                    <Select.Content className="select-content" position="popper" sideOffset={4}>
+                                        <Select.Viewport>
+                                            {TRIGGER_MODES.map((m) => (
+                                                <Select.Item key={m.value} value={m.value} className="select-item">
+                                                    <Select.ItemText>{m.label}</Select.ItemText>
+                                                </Select.Item>
+                                            ))}
+                                        </Select.Viewport>
+                                    </Select.Content>
+                                </Select.Portal>
+                            </Select.Root>
+                        </div>
 
-                        {config.crossfade_mode === "segue" && (
+                        {config.trigger_mode === "fixed_point_ms" && (
                             <div style={{ marginTop: 6 }}>
                                 <StyledSlider
                                     label="Fixed point"
                                     value={config.fixed_crossfade_point_ms ?? 8000}
                                     min={500}
                                     max={20000}
-                                    step={500}
-                                    onChange={(v) => update("fixed_crossfade_point_ms", v)}
+                                    step={250}
+                                    onChange={(v) => {
+                                        update("fixed_crossfade_point_ms", v);
+                                        update("fixed_crossfade_ms", v);
+                                    }}
                                 />
                             </div>
+                        )}
+
+                        {config.trigger_mode === "auto_detect_db" && (
+                            <>
+                                <div style={{ marginTop: 6 }}>
+                                    <StyledSlider
+                                        label="Trigger dB"
+                                        value={config.auto_detect_db}
+                                        min={-60}
+                                        max={0}
+                                        step={1}
+                                        onChange={(v) => update("auto_detect_db", v)}
+                                        unit="dB"
+                                    />
+                                </div>
+                                <div style={{ marginTop: 6 }}>
+                                    <StyledSlider
+                                        label="Detect min"
+                                        value={config.auto_detect_min_ms}
+                                        min={0}
+                                        max={30000}
+                                        step={100}
+                                        onChange={(v) => update("auto_detect_min_ms", v)}
+                                    />
+                                </div>
+                                <div style={{ marginTop: 6 }}>
+                                    <StyledSlider
+                                        label="Detect max"
+                                        value={config.auto_detect_max_ms}
+                                        min={500}
+                                        max={45000}
+                                        step={100}
+                                        onChange={(v) => update("auto_detect_max_ms", v)}
+                                    />
+                                </div>
+                            </>
+                        )}
+
+                        <div style={{ marginTop: 6 }}>
+                            <StyledSlider
+                                label="Min fade"
+                                value={config.min_fade_time_ms}
+                                min={500}
+                                max={15000}
+                                step={100}
+                                onChange={(v) => update("min_fade_time_ms", v)}
+                            />
+                        </div>
+                        <div style={{ marginTop: 6 }}>
+                            <StyledSlider
+                                label="Max fade"
+                                value={config.max_fade_time_ms}
+                                min={1000}
+                                max={30000}
+                                step={100}
+                                onChange={(v) => update("max_fade_time_ms", v)}
+                            />
+                        </div>
+                        <div style={{ marginTop: 6 }}>
+                            <StyledSlider
+                                label="Skip short"
+                                value={config.skip_short_tracks_secs ?? 65}
+                                min={0}
+                                max={180}
+                                step={1}
+                                onChange={(v) => update("skip_short_tracks_secs", Math.round(v))}
+                                unit="sec"
+                            />
+                        </div>
+
+                        <div className="separator" />
+
+                        {/* AutoDJ transition section */}
+                        <div className="section-label" style={{ marginBottom: 10 }}>AutoDJ Transitions</div>
+                        <div className="flex items-center gap-3 form-row">
+                            <span className="form-label">Engine</span>
+                            <Select.Root
+                                value={autoTransition.engine}
+                                onValueChange={(v) =>
+                                    setAutoTransition((prev) => ({ ...prev, engine: v as AutodjTransitionEngine }))
+                                }
+                            >
+                                <Select.Trigger className="select-trigger">
+                                    <Select.Value />
+                                    <ChevronDown size={12} />
+                                </Select.Trigger>
+                                <Select.Portal>
+                                    <Select.Content className="select-content" position="popper" sideOffset={4}>
+                                        <Select.Viewport>
+                                            {AUTODJ_ENGINES.map((m) => (
+                                                <Select.Item key={m.value} value={m.value} className="select-item">
+                                                    <Select.ItemText>{m.label}</Select.ItemText>
+                                                </Select.Item>
+                                            ))}
+                                        </Select.Viewport>
+                                    </Select.Content>
+                                </Select.Portal>
+                            </Select.Root>
+                        </div>
+
+                        {autoTransition.engine === "mixxx_planner" && (
+                            <>
+                                <Checkbox
+                                    checked={autoTransition.mixxx_planner_config.enabled}
+                                    onCheckedChange={(v) =>
+                                        setAutoTransition((prev) => ({
+                                            ...prev,
+                                            mixxx_planner_config: { ...prev.mixxx_planner_config, enabled: v },
+                                        }))
+                                    }
+                                    label="Enable planner-driven transitions"
+                                />
+                                <div className="flex items-center gap-3 form-row" style={{ marginTop: 10 }}>
+                                    <span className="form-label">Mode</span>
+                                    <Select.Root
+                                        value={autoTransition.mixxx_planner_config.mode}
+                                        onValueChange={(v) =>
+                                            setAutoTransition((prev) => ({
+                                                ...prev,
+                                                mixxx_planner_config: {
+                                                    ...prev.mixxx_planner_config,
+                                                    mode: v as AutoTransitionMode,
+                                                },
+                                            }))
+                                        }
+                                    >
+                                        <Select.Trigger className="select-trigger">
+                                            <Select.Value />
+                                            <ChevronDown size={12} />
+                                        </Select.Trigger>
+                                        <Select.Portal>
+                                            <Select.Content className="select-content" position="popper" sideOffset={4}>
+                                                <Select.Viewport>
+                                                    {AUTO_MODES.map((m) => (
+                                                        <Select.Item key={m.value} value={m.value} className="select-item">
+                                                            <Select.ItemText>{m.label}</Select.ItemText>
+                                                        </Select.Item>
+                                                    ))}
+                                                </Select.Viewport>
+                                            </Select.Content>
+                                        </Select.Portal>
+                                    </Select.Root>
+                                </div>
+                                <div style={{ marginTop: 6 }}>
+                                    <StyledSlider
+                                        label="Transition"
+                                        value={autoTransition.mixxx_planner_config.transition_time_sec}
+                                        min={-15}
+                                        max={30}
+                                        step={1}
+                                        onChange={(v) =>
+                                            setAutoTransition((prev) => ({
+                                                ...prev,
+                                                mixxx_planner_config: {
+                                                    ...prev.mixxx_planner_config,
+                                                    transition_time_sec: Math.round(v),
+                                                },
+                                            }))
+                                        }
+                                        unit="s"
+                                    />
+                                </div>
+                                <div style={{ marginTop: 6 }}>
+                                    <StyledSlider
+                                        label="Min track"
+                                        value={autoTransition.mixxx_planner_config.min_track_duration_ms}
+                                        min={100}
+                                        max={5000}
+                                        step={100}
+                                        onChange={(v) =>
+                                            setAutoTransition((prev) => ({
+                                                ...prev,
+                                                mixxx_planner_config: {
+                                                    ...prev.mixxx_planner_config,
+                                                    min_track_duration_ms: Math.round(v),
+                                                },
+                                            }))
+                                        }
+                                    />
+                                </div>
+                            </>
                         )}
 
                         <div className="separator" />

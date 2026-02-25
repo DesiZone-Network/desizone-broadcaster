@@ -12,6 +12,7 @@ pub(crate) fn parse_deck(deck: &str) -> Result<DeckId, String> {
         "deck_b" => Ok(DeckId::DeckB),
         "sound_fx" => Ok(DeckId::SoundFx),
         "aux_1" => Ok(DeckId::Aux1),
+        "aux_2" => Ok(DeckId::Aux2),
         "voice_fx" => Ok(DeckId::VoiceFx),
         _ => Err(format!("Unknown deck: {deck}")),
     }
@@ -26,7 +27,21 @@ pub async fn load_track(
 ) -> Result<(), String> {
     let deck_id = parse_deck(&deck)?;
     let path = PathBuf::from(&file_path);
-    state.engine.lock().unwrap().load_track(deck_id, path, song_id)
+
+    // Validate before handing off to the RT ring buffer so the frontend
+    // receives an immediate, descriptive error instead of silent failure.
+    if !path.exists() {
+        return Err(format!("File not found: {file_path}"));
+    }
+    if !path.is_file() {
+        return Err(format!("Path is not a file: {file_path}"));
+    }
+
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .load_track(deck_id, path, song_id)
 }
 
 #[tauri::command]
@@ -59,6 +74,34 @@ pub async fn set_channel_gain(
 ) -> Result<(), String> {
     let deck_id = parse_deck(&deck)?;
     state.engine.lock().unwrap().set_channel_gain(deck_id, gain)
+}
+
+#[tauri::command]
+pub async fn set_deck_pitch(
+    deck: String,
+    pitch_pct: f32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_deck_pitch(deck_id, pitch_pct)
+}
+
+#[tauri::command]
+pub async fn set_deck_tempo(
+    deck: String,
+    tempo_pct: f32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_deck_tempo(deck_id, tempo_pct)
 }
 
 #[tauri::command]

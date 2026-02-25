@@ -9,7 +9,10 @@
 /// stopping the loop (guarded by a Mutex over the slot Vec).
 use std::sync::{Arc, Mutex};
 
-use ringbuf::{traits::{Consumer as _, Producer as _, Split}, HeapRb};
+use ringbuf::{
+    traits::{Consumer as _, Producer as _, Split},
+    HeapRb,
+};
 use serde::{Deserialize, Serialize};
 
 /// Unique ID for a broadcaster slot (= encoder id in DB)

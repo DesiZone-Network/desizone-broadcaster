@@ -116,10 +116,7 @@ pub async fn refresh_play_stats_cache(
 }
 
 /// Update hourly play counts (called on each track play)
-pub async fn update_hourly_play_count(
-    pool: &SqlitePool,
-    song_id: i64,
-) -> Result<(), sqlx::Error> {
+pub async fn update_hourly_play_count(pool: &SqlitePool, song_id: i64) -> Result<(), sqlx::Error> {
     let now = chrono::Local::now();
     let date = now.format("%Y-%m-%d").to_string();
     let hour = now.hour() as i32;
@@ -139,4 +136,3 @@ pub async fn update_hourly_play_count(
 
     Ok(())
 }
-

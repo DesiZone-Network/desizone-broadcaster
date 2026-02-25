@@ -12,8 +12,8 @@ use ringbuf::{traits::Split, HeapRb};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    crossfade::{CrossfadeConfig, CrossfadeState, DeckId},
-    deck::{Deck, DeckState},
+    crossfade::{CrossfadeConfig, CrossfadeState, CrossfadeTriggerMode, DeckId},
+    deck::{AttachOp, Deck, DeckState, PreparedTrack, TrackCompletion},
     dsp::pipeline::{ChannelPipeline, PipelineSettings},
     mixer::Mixer,
 };
@@ -40,6 +40,28 @@ pub struct DeckStateEvent {
     pub state: String,
     pub position_ms: u64,
     pub duration_ms: u64,
+    pub song_id: Option<i64>,
+    pub file_path: Option<String>,
+    pub playback_rate: f32,
+    pub pitch_pct: f32,
+    pub tempo_pct: f32,
+    pub decoder_buffer_ms: u64,
+    pub rms_db_pre_fader: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackCompletionEvent {
+    pub deck: String,
+    pub song_id: i64,
+    pub queue_id: Option<i64>,
+    pub from_rotation: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualFadeDirection {
+    AtoB,
+    BtoA,
 }
 
 // ── Engine ───────────────────────────────────────────────────────────────────
@@ -52,12 +74,14 @@ struct RtState {
     mixer: Mixer,
     crossfade: CrossfadeState,
     crossfade_config: CrossfadeConfig,
+    manual_crossfade_pos: f32,
     sample_rate: u32,
     // Per-channel scratch buffers (avoid alloc in callback)
     buf_deck_a: Vec<f32>,
     buf_deck_b: Vec<f32>,
     buf_sound_fx: Vec<f32>,
     buf_aux1: Vec<f32>,
+    buf_aux2: Vec<f32>,
     buf_voice_fx: Vec<f32>,
     // Encoder ring buffer producer (to stream/icecast thread)
     encoder_prod: ringbuf::HeapProd<f32>,
@@ -66,14 +90,45 @@ struct RtState {
 /// Commands sent from the main thread → real-time thread via a lock-free channel.
 /// Kept small; heavy state lives in `AudioEngine` behind the Mutex.
 enum EngineCmd {
-    LoadTrack { deck: DeckId, path: PathBuf, song_id: Option<i64> },
+    AttachPreparedTrack {
+        deck: DeckId,
+        prepared: PreparedTrack,
+        op: AttachOp,
+    },
     Play(DeckId),
     Pause(DeckId),
-    Seek { deck: DeckId, position_ms: u64 },
-    SetGain { deck: DeckId, gain: f32 },
-    StartCrossfade { outgoing: DeckId, incoming: DeckId },
+    StopWithCompletion(DeckId),
+    SetGain {
+        deck: DeckId,
+        gain: f32,
+    },
+    SetDeckPitch {
+        deck: DeckId,
+        pct: f32,
+    },
+    SetDeckTempo {
+        deck: DeckId,
+        pct: f32,
+    },
+    StartCrossfade {
+        outgoing: DeckId,
+        incoming: DeckId,
+    },
+    SetManualCrossfade {
+        position: f32,
+    },
+    TriggerManualFade {
+        direction: ManualFadeDirection,
+        duration_ms: u32,
+    },
     SetCrossfadeConfig(CrossfadeConfig),
-    SetChannelPipeline { deck: DeckId, settings: PipelineSettings },
+    SetChannelPipeline {
+        deck: DeckId,
+        settings: PipelineSettings,
+    },
+    SetMasterPipeline {
+        settings: PipelineSettings,
+    },
 }
 
 /// The main audio engine — lives behind `Arc<Mutex<AudioEngine>>` in `AppState`.
@@ -131,12 +186,20 @@ impl AudioEngine {
                 m.insert(DeckId::DeckB, Deck::new(DeckId::DeckB));
                 m.insert(DeckId::SoundFx, Deck::new(DeckId::SoundFx));
                 m.insert(DeckId::Aux1, Deck::new(DeckId::Aux1));
+                m.insert(DeckId::Aux2, Deck::new(DeckId::Aux2));
                 m.insert(DeckId::VoiceFx, Deck::new(DeckId::VoiceFx));
                 m
             },
             pipelines: {
                 let mut m = HashMap::new();
-                for id in [DeckId::DeckA, DeckId::DeckB, DeckId::SoundFx, DeckId::Aux1, DeckId::VoiceFx] {
+                for id in [
+                    DeckId::DeckA,
+                    DeckId::DeckB,
+                    DeckId::SoundFx,
+                    DeckId::Aux1,
+                    DeckId::Aux2,
+                    DeckId::VoiceFx,
+                ] {
                     m.insert(id, ChannelPipeline::new(sample_rate as f32));
                 }
                 m
@@ -145,11 +208,13 @@ impl AudioEngine {
             mixer: Mixer::new(),
             crossfade: CrossfadeState::default(),
             crossfade_config: CrossfadeConfig::default(),
+            manual_crossfade_pos: -1.0,
             sample_rate,
             buf_deck_a: Vec::new(),
             buf_deck_b: Vec::new(),
             buf_sound_fx: Vec::new(),
             buf_aux1: Vec::new(),
+            buf_aux2: Vec::new(),
             buf_voice_fx: Vec::new(),
             encoder_prod: enc_prod,
         }));
@@ -157,7 +222,9 @@ impl AudioEngine {
         let rt_arc_cb = Arc::clone(&rt_arc);
 
         let stream = Self::build_stream(&device, &config.into(), rt_arc_cb, cmd_cons)?;
-        stream.play().map_err(|e| format!("Stream play error: {e}"))?;
+        stream
+            .play()
+            .map_err(|e| format!("Stream play error: {e}"))?;
 
         Ok(Self {
             _stream: Some(stream),
@@ -170,8 +237,31 @@ impl AudioEngine {
 
     // ── Public control API ────────────────────────────────────────────────
 
-    pub fn load_track(&mut self, deck: DeckId, path: PathBuf, song_id: Option<i64>) -> Result<(), String> {
-        self.send_cmd(EngineCmd::LoadTrack { deck, path, song_id })
+    pub fn load_track(
+        &mut self,
+        deck: DeckId,
+        path: PathBuf,
+        song_id: Option<i64>,
+    ) -> Result<(), String> {
+        self.load_track_with_source(deck, path, song_id, None, false, None)
+    }
+
+    pub fn load_track_with_source(
+        &mut self,
+        deck: DeckId,
+        path: PathBuf,
+        song_id: Option<i64>,
+        queue_id: Option<i64>,
+        from_rotation: bool,
+        declared_duration_ms: Option<u64>,
+    ) -> Result<(), String> {
+        let prepared =
+            Deck::prepare_load(path, song_id, queue_id, from_rotation, declared_duration_ms)?;
+        self.send_cmd(EngineCmd::AttachPreparedTrack {
+            deck,
+            prepared,
+            op: AttachOp::Load,
+        })
     }
 
     pub fn play(&mut self, deck: DeckId) -> Result<(), String> {
@@ -182,12 +272,54 @@ impl AudioEngine {
         self.send_cmd(EngineCmd::Pause(deck))
     }
 
+    pub fn stop_with_completion(&mut self, deck: DeckId) -> Result<(), String> {
+        self.send_cmd(EngineCmd::StopWithCompletion(deck))
+    }
+
     pub fn seek(&mut self, deck: DeckId, position_ms: u64) -> Result<(), String> {
-        self.send_cmd(EngineCmd::Seek { deck, position_ms })
+        let (path, song_id, queue_id, from_rotation, declared_duration_ms) = {
+            let rt = self.rt_state.lock().unwrap();
+            let d = rt.decks.get(&deck).ok_or("Unknown deck")?;
+            let path = d.file_path.clone().ok_or("No track loaded")?;
+            (
+                path,
+                d.song_id,
+                d.queue_id,
+                d.from_rotation,
+                d.declared_duration_ms,
+            )
+        };
+        let prepared = Deck::prepare_seek(
+            path,
+            song_id,
+            queue_id,
+            from_rotation,
+            declared_duration_ms,
+            position_ms,
+        )?;
+        self.send_cmd(EngineCmd::AttachPreparedTrack {
+            deck,
+            prepared,
+            op: AttachOp::Seek,
+        })
     }
 
     pub fn set_channel_gain(&mut self, deck: DeckId, gain: f32) -> Result<(), String> {
         self.send_cmd(EngineCmd::SetGain { deck, gain })
+    }
+
+    pub fn set_deck_pitch(&mut self, deck: DeckId, pitch_pct: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetDeckPitch {
+            deck,
+            pct: pitch_pct,
+        })
+    }
+
+    pub fn set_deck_tempo(&mut self, deck: DeckId, tempo_pct: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetDeckTempo {
+            deck,
+            pct: tempo_pct,
+        })
     }
 
     pub fn start_crossfade(&mut self, outgoing: DeckId, incoming: DeckId) -> Result<(), String> {
@@ -198,8 +330,31 @@ impl AudioEngine {
         self.send_cmd(EngineCmd::SetCrossfadeConfig(config))
     }
 
-    pub fn set_channel_pipeline(&mut self, deck: DeckId, settings: PipelineSettings) -> Result<(), String> {
+    pub fn set_manual_crossfade(&mut self, position: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetManualCrossfade { position })
+    }
+
+    pub fn trigger_manual_fade(
+        &mut self,
+        direction: ManualFadeDirection,
+        duration_ms: u32,
+    ) -> Result<(), String> {
+        self.send_cmd(EngineCmd::TriggerManualFade {
+            direction,
+            duration_ms,
+        })
+    }
+
+    pub fn set_channel_pipeline(
+        &mut self,
+        deck: DeckId,
+        settings: PipelineSettings,
+    ) -> Result<(), String> {
         self.send_cmd(EngineCmd::SetChannelPipeline { deck, settings })
+    }
+
+    pub fn set_master_pipeline(&mut self, settings: PipelineSettings) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetMasterPipeline { settings })
     }
 
     pub fn get_crossfade_config(&self) -> CrossfadeConfig {
@@ -213,29 +368,94 @@ impl AudioEngine {
             state: format!("{:?}", d.state).to_lowercase(),
             position_ms: d.position_ms(),
             duration_ms: d.duration_ms(),
+            song_id: d.song_id,
+            file_path: d
+                .file_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            playback_rate: d.playback_rate,
+            pitch_pct: d.pitch_pct,
+            tempo_pct: d.tempo_pct,
+            decoder_buffer_ms: d.decoder_buffered_ms(),
+            rms_db_pre_fader: d.rms_db_pre_fader,
         })
+    }
+
+    pub fn get_crossfade_progress_event(&self) -> Option<CrossfadeProgressEvent> {
+        let rt = self.rt_state.lock().unwrap();
+        let progress = rt.crossfade.progress()?;
+        let outgoing = rt.crossfade.outgoing()?;
+        let incoming = rt.crossfade.incoming()?;
+        Some(CrossfadeProgressEvent {
+            progress,
+            outgoing_deck: outgoing.to_string(),
+            incoming_deck: incoming.to_string(),
+        })
+    }
+
+    pub fn get_manual_crossfade_pos(&self) -> f32 {
+        self.rt_state.lock().unwrap().manual_crossfade_pos
+    }
+
+    pub fn take_track_completions(&self) -> Vec<TrackCompletionEvent> {
+        let mut rt = self.rt_state.lock().unwrap();
+        let mut out = Vec::new();
+        for id in [
+            DeckId::DeckA,
+            DeckId::DeckB,
+            DeckId::SoundFx,
+            DeckId::Aux1,
+            DeckId::Aux2,
+            DeckId::VoiceFx,
+        ] {
+            if let Some(deck) = rt.decks.get_mut(&id) {
+                if let Some(TrackCompletion {
+                    song_id,
+                    queue_id,
+                    from_rotation,
+                }) = deck.take_completion()
+                {
+                    out.push(TrackCompletionEvent {
+                        deck: id.to_string(),
+                        song_id,
+                        queue_id,
+                        from_rotation,
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn get_vu_readings(&self) -> Vec<VuEvent> {
         let rt = self.rt_state.lock().unwrap();
-        [DeckId::DeckA, DeckId::DeckB, DeckId::SoundFx, DeckId::Aux1, DeckId::VoiceFx]
-            .iter()
-            .map(|&id| {
-                let ch = rt.mixer.channel(id);
-                VuEvent {
-                    channel: id.to_string(),
-                    left_db: ch.vu_left_db,
-                    right_db: ch.vu_right_db,
-                }
-            })
-            .collect()
+        [
+            DeckId::DeckA,
+            DeckId::DeckB,
+            DeckId::SoundFx,
+            DeckId::Aux1,
+            DeckId::Aux2,
+            DeckId::VoiceFx,
+        ]
+        .iter()
+        .map(|&id| {
+            let ch = rt.mixer.channel(id);
+            VuEvent {
+                channel: id.to_string(),
+                left_db: ch.vu_left_db,
+                right_db: ch.vu_right_db,
+            }
+        })
+        .collect()
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
 
     fn send_cmd(&mut self, cmd: EngineCmd) -> Result<(), String> {
         use ringbuf::traits::Producer as _;
-        self.cmd_tx.try_push(cmd).map_err(|_| "Command queue full".to_string())
+        self.cmd_tx
+            .try_push(cmd)
+            .map_err(|_| "Command queue full".to_string())
     }
 
     fn build_stream(
@@ -296,34 +516,100 @@ fn audio_callback(
         rt.buf_deck_b.resize(len, 0.0);
         rt.buf_sound_fx.resize(len, 0.0);
         rt.buf_aux1.resize(len, 0.0);
+        rt.buf_aux2.resize(len, 0.0);
         rt.buf_voice_fx.resize(len, 0.0);
     }
 
     // ── Crossfade gain computation ──────────────────────────────────────
     let frames = (len / 2) as u64;
-    let (xf_gain_out, xf_gain_in, xf_complete) = rt.crossfade.advance(frames);
+    // Capture endpoints before advance so completion handling can still stop
+    // outgoing / promote incoming on the exact callback where fade reaches 100%.
     let (outgoing_id, incoming_id) = (rt.crossfade.outgoing(), rt.crossfade.incoming());
+    let crossfade_active = rt.crossfade.is_fading();
+    let (xf_gain_out, xf_gain_in, mut xf_complete) = rt.crossfade.advance(frames);
+    let manual_pos = rt.manual_crossfade_pos.clamp(-1.0, 1.0);
+    let manual_gain_a = ((1.0 - manual_pos) * 0.5).clamp(0.0, 1.0);
+    let manual_gain_b = ((1.0 + manual_pos) * 0.5).clamp(0.0, 1.0);
+    let a_live = rt
+        .decks
+        .get(&DeckId::DeckA)
+        .map(|d| matches!(d.state, DeckState::Playing | DeckState::Crossfading))
+        .unwrap_or(false);
+    let b_live = rt
+        .decks
+        .get(&DeckId::DeckB)
+        .map(|d| matches!(d.state, DeckState::Playing | DeckState::Crossfading))
+        .unwrap_or(false);
 
     // ── Fill per-deck buffers ────────────────────────────────────────────
+    // Cache device_sr before the loop — borrowing rt.sample_rate while
+    // rt.decks is mutably borrowed triggers E0502.
+    let device_sr = rt.sample_rate;
+    let mut force_crossfade_complete = false;
     for (id, buf) in [
         (DeckId::DeckA, &mut rt.buf_deck_a as *mut Vec<f32>),
         (DeckId::DeckB, &mut rt.buf_deck_b as *mut Vec<f32>),
         (DeckId::SoundFx, &mut rt.buf_sound_fx as *mut Vec<f32>),
         (DeckId::Aux1, &mut rt.buf_aux1 as *mut Vec<f32>),
+        (DeckId::Aux2, &mut rt.buf_aux2 as *mut Vec<f32>),
         (DeckId::VoiceFx, &mut rt.buf_voice_fx as *mut Vec<f32>),
     ] {
         let buf = unsafe { &mut *buf };
         if let Some(deck) = rt.decks.get_mut(&id) {
-            // Apply crossfade gain to outgoing/incoming decks
-            if Some(id) == outgoing_id {
-                deck.gain = xf_gain_out;
-            } else if Some(id) == incoming_id {
-                deck.gain = xf_gain_in;
+            if crossfade_active {
+                // Active auto/timed fade owns Deck A/B crossfade gain.
+                if Some(id) == outgoing_id {
+                    deck.xfade_gain = xf_gain_out;
+                } else if Some(id) == incoming_id {
+                    deck.xfade_gain = xf_gain_in;
+                } else if matches!(id, DeckId::DeckA | DeckId::DeckB) {
+                    deck.xfade_gain = 0.0;
+                } else {
+                    deck.xfade_gain = 1.0;
+                }
+            } else {
+                // Manual crossfader when no active auto/timed fade.
+                // If only one deck is live, force that deck audible to avoid
+                // accidental silence from stale slider position.
+                match id {
+                    DeckId::DeckA => {
+                        deck.xfade_gain = if a_live ^ b_live {
+                            if a_live {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            manual_gain_a
+                        };
+                    }
+                    DeckId::DeckB => {
+                        deck.xfade_gain = if a_live ^ b_live {
+                            if b_live {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            manual_gain_b
+                        };
+                    }
+                    _ => deck.xfade_gain = 1.0,
+                }
             }
-            deck.fill_buffer(buf);
+            deck.fill_buffer(buf, device_sr);
+            if matches!(deck.state, DeckState::Playing | DeckState::Crossfading) && deck.is_eof() {
+                if crossfade_active && Some(id) == outgoing_id {
+                    force_crossfade_complete = true;
+                }
+                deck.mark_eof_stop();
+            }
         } else {
             buf.fill(0.0);
         }
+    }
+    if force_crossfade_complete {
+        xf_complete = true;
     }
 
     // ── Per-channel DSP (EQ → AGC → Compressor) ─────────────────────────
@@ -332,6 +618,7 @@ fn audio_callback(
         (DeckId::DeckB, &mut rt.buf_deck_b as *mut Vec<f32>),
         (DeckId::SoundFx, &mut rt.buf_sound_fx as *mut Vec<f32>),
         (DeckId::Aux1, &mut rt.buf_aux1 as *mut Vec<f32>),
+        (DeckId::Aux2, &mut rt.buf_aux2 as *mut Vec<f32>),
         (DeckId::VoiceFx, &mut rt.buf_voice_fx as *mut Vec<f32>),
     ] {
         let buf = unsafe { &mut *buf };
@@ -343,16 +630,17 @@ fn audio_callback(
     // ── Mix into master ──────────────────────────────────────────────────
     // SAFETY: we hold an exclusive &mut RtState from try_lock().
     // The buf_* fields and mixer.mix_into are disjoint fields; no aliasing.
-    let (a, b, sfx, aux, vfx) = unsafe {
+    let (a, b, sfx, aux1, aux2, vfx) = unsafe {
         (
             std::slice::from_raw_parts(rt.buf_deck_a.as_ptr(), rt.buf_deck_a.len()),
             std::slice::from_raw_parts(rt.buf_deck_b.as_ptr(), rt.buf_deck_b.len()),
             std::slice::from_raw_parts(rt.buf_sound_fx.as_ptr(), rt.buf_sound_fx.len()),
             std::slice::from_raw_parts(rt.buf_aux1.as_ptr(), rt.buf_aux1.len()),
+            std::slice::from_raw_parts(rt.buf_aux2.as_ptr(), rt.buf_aux2.len()),
             std::slice::from_raw_parts(rt.buf_voice_fx.as_ptr(), rt.buf_voice_fx.len()),
         )
     };
-    rt.mixer.mix_into(output, a, b, sfx, aux, vfx);
+    rt.mixer.mix_into(output, a, b, sfx, aux1, aux2, vfx);
 
     // ── Master DSP (limiter / output chain) ─────────────────────────────
     rt.master_pipeline.process(output);
@@ -369,18 +657,25 @@ fn audio_callback(
         // Restore full gain on the new active deck
         if let Some(id) = incoming_id {
             if let Some(deck) = rt.decks.get_mut(&id) {
-                deck.gain = 1.0;
+                deck.xfade_gain = 1.0;
             }
         }
         if let Some(id) = outgoing_id {
             if let Some(deck) = rt.decks.get_mut(&id) {
-                deck.stop();
+                deck.stop_with_completion();
             }
+        }
+        if let Some(id) = incoming_id {
+            rt.manual_crossfade_pos = if id == DeckId::DeckB { 1.0 } else { -1.0 };
         }
     }
 
     // ── Auto-detect crossfade trigger ───────────────────────────────────
-    if rt.crossfade.is_idle() && rt.crossfade_config.auto_detect_enabled {
+    let autodj_mode = crate::scheduler::autodj::get_dj_mode();
+    if rt.crossfade.is_idle()
+        && rt.crossfade_config.auto_detect_enabled
+        && autodj_mode != crate::scheduler::autodj::DjMode::AutoDj
+    {
         check_auto_crossfade(&mut rt);
     }
 }
@@ -391,11 +686,9 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
 
     while let Some(cmd) = cmd_cons.try_pop() {
         match cmd {
-            EngineCmd::LoadTrack { deck, path, song_id } => {
+            EngineCmd::AttachPreparedTrack { deck, prepared, op } => {
                 if let Some(d) = rt.decks.get_mut(&deck) {
-                    if let Err(e) = d.load(path, song_id) {
-                        log::warn!("Load error on {deck}: {e}");
-                    }
+                    d.request_attach(prepared, op);
                 }
             }
             EngineCmd::Play(deck) => {
@@ -408,20 +701,38 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
                     d.pause();
                 }
             }
-            EngineCmd::Seek { deck, position_ms } => {
+            EngineCmd::StopWithCompletion(deck) => {
                 if let Some(d) = rt.decks.get_mut(&deck) {
-                    if let Err(e) = d.seek(position_ms) {
-                        log::warn!("Seek error: {e}");
-                    }
+                    d.stop_with_completion();
                 }
             }
             EngineCmd::SetGain { deck, gain } => {
                 if let Some(d) = rt.decks.get_mut(&deck) {
-                    d.gain = gain;
+                    d.channel_gain = gain.clamp(0.0, 1.0);
+                }
+            }
+            EngineCmd::SetDeckPitch { deck, pct } => {
+                if let Some(d) = rt.decks.get_mut(&deck) {
+                    d.set_pitch_pct(pct);
+                }
+            }
+            EngineCmd::SetDeckTempo { deck, pct } => {
+                if let Some(d) = rt.decks.get_mut(&deck) {
+                    d.set_tempo_pct(pct);
                 }
             }
             EngineCmd::StartCrossfade { outgoing, incoming } => {
+                if rt.crossfade.is_fading() {
+                    continue;
+                }
+                let Some((outgoing, incoming)) = resolve_crossfade_pair(rt, outgoing, incoming)
+                else {
+                    log::warn!("Ignoring start_crossfade: no valid outgoing/incoming deck pair");
+                    continue;
+                };
                 let config = rt.crossfade_config.clone();
+                let mut config = config;
+                cap_fade_window_to_outgoing_remaining(rt, outgoing, &mut config);
                 rt.crossfade = CrossfadeState::start(outgoing, incoming, config, rt.sample_rate);
                 if let Some(d) = rt.decks.get_mut(&outgoing) {
                     d.set_crossfading();
@@ -433,19 +744,127 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
             EngineCmd::SetCrossfadeConfig(config) => {
                 rt.crossfade_config = config;
             }
+            EngineCmd::SetManualCrossfade { position } => {
+                rt.manual_crossfade_pos = position.clamp(-1.0, 1.0);
+            }
+            EngineCmd::TriggerManualFade {
+                direction,
+                duration_ms,
+            } => {
+                if rt.crossfade.is_fading() {
+                    continue;
+                }
+                let (requested_outgoing, requested_incoming) = match direction {
+                    ManualFadeDirection::AtoB => (DeckId::DeckA, DeckId::DeckB),
+                    ManualFadeDirection::BtoA => (DeckId::DeckB, DeckId::DeckA),
+                };
+                let Some((outgoing, incoming)) =
+                    resolve_crossfade_pair(rt, requested_outgoing, requested_incoming)
+                else {
+                    log::warn!("Ignoring manual fade: no valid outgoing/incoming deck pair");
+                    continue;
+                };
+                let mut config = rt.crossfade_config.clone();
+                config.fade_out_time_ms = duration_ms.max(100);
+                config.fade_in_time_ms = duration_ms.max(100);
+                cap_fade_window_to_outgoing_remaining(rt, outgoing, &mut config);
+                rt.crossfade = CrossfadeState::start(outgoing, incoming, config, rt.sample_rate);
+                if let Some(d) = rt.decks.get_mut(&outgoing) {
+                    d.set_crossfading();
+                }
+                if let Some(d) = rt.decks.get_mut(&incoming) {
+                    d.play();
+                }
+            }
             EngineCmd::SetChannelPipeline { deck, settings } => {
                 if let Some(p) = rt.pipelines.get_mut(&deck) {
                     *p = ChannelPipeline::from_settings(rt.sample_rate as f32, settings);
                 }
             }
+            EngineCmd::SetMasterPipeline { settings } => {
+                rt.master_pipeline =
+                    ChannelPipeline::from_settings(rt.sample_rate as f32, settings);
+            }
         }
+    }
+}
+
+#[inline]
+fn is_playing_like(state: &DeckState) -> bool {
+    matches!(state, DeckState::Playing | DeckState::Crossfading)
+}
+
+#[inline]
+fn is_loaded_like(state: &DeckState) -> bool {
+    matches!(
+        state,
+        DeckState::Ready | DeckState::Paused | DeckState::Playing | DeckState::Crossfading
+    )
+}
+
+// Resolve stale or inverted crossfade requests against actual deck runtime state.
+// This keeps direction consistent when UI/backend are briefly out of sync.
+fn resolve_crossfade_pair(
+    rt: &RtState,
+    outgoing: DeckId,
+    incoming: DeckId,
+) -> Option<(DeckId, DeckId)> {
+    if outgoing == incoming {
+        return None;
+    }
+
+    let out_state = rt.decks.get(&outgoing).map(|d| d.state.clone())?;
+    let in_state = rt.decks.get(&incoming).map(|d| d.state.clone())?;
+
+    if is_playing_like(&out_state) && is_loaded_like(&in_state) {
+        return Some((outgoing, incoming));
+    }
+    if is_playing_like(&in_state) && is_loaded_like(&out_state) {
+        return Some((incoming, outgoing));
+    }
+
+    let a_state = rt.decks.get(&DeckId::DeckA).map(|d| d.state.clone())?;
+    let b_state = rt.decks.get(&DeckId::DeckB).map(|d| d.state.clone())?;
+
+    if is_playing_like(&a_state) && is_loaded_like(&b_state) {
+        Some((DeckId::DeckA, DeckId::DeckB))
+    } else if is_playing_like(&b_state) && is_loaded_like(&a_state) {
+        Some((DeckId::DeckB, DeckId::DeckA))
+    } else {
+        None
+    }
+}
+
+// Prevent long fade windows from outlasting the outgoing deck's remaining time.
+// This avoids "incoming only appears at the very end" behavior when the trigger
+// fires late in the song.
+fn cap_fade_window_to_outgoing_remaining(
+    rt: &RtState,
+    outgoing: DeckId,
+    config: &mut CrossfadeConfig,
+) {
+    let remaining_ms = rt
+        .decks
+        .get(&outgoing)
+        .map(|d| d.remaining_ms())
+        .unwrap_or(0);
+    if remaining_ms == 0 {
+        return;
+    }
+    let cap_ms = remaining_ms.min(u32::MAX as u64) as u32;
+    config.fade_out_time_ms = config.fade_out_time_ms.min(cap_ms).max(1);
+    config.fade_in_time_ms = config.fade_in_time_ms.min(cap_ms).max(1);
+    config.min_fade_time_ms = config.min_fade_time_ms.min(cap_ms).max(1);
+    config.max_fade_time_ms = config.max_fade_time_ms.min(cap_ms);
+    if config.max_fade_time_ms < config.min_fade_time_ms {
+        config.max_fade_time_ms = config.min_fade_time_ms;
     }
 }
 
 /// Check if the active deck's RMS has dropped below the auto-detect threshold.
 fn check_auto_crossfade(rt: &mut RtState) {
     let cfg = &rt.crossfade_config;
-    if !cfg.auto_detect_enabled {
+    if !cfg.auto_detect_enabled || cfg.trigger_mode != CrossfadeTriggerMode::AutoDetectDb {
         return;
     }
 
@@ -472,7 +891,12 @@ fn check_auto_crossfade(rt: &mut RtState) {
             DeckId::DeckA => DeckId::DeckB,
             _ => DeckId::DeckA,
         };
-        if rt.decks.get(&incoming).map(|d| d.state == DeckState::Ready).unwrap_or(false) {
+        if rt
+            .decks
+            .get(&incoming)
+            .map(|d| d.state == DeckState::Ready)
+            .unwrap_or(false)
+        {
             let config = rt.crossfade_config.clone();
             rt.crossfade = CrossfadeState::start(outgoing, incoming, config, rt.sample_rate);
             if let Some(d) = rt.decks.get_mut(&outgoing) {

@@ -1,9 +1,8 @@
 /// `commands/mic_commands.rs` — Phase 5 Tauri commands for microphone/voice
-
 use tauri::{Emitter, State};
 
 use crate::{
-    audio::mic_input::{AudioDevice, MicConfig, list_input_devices},
+    audio::mic_input::{list_input_devices, AudioDevice, MicConfig},
     state::AppState,
 };
 
@@ -41,7 +40,11 @@ pub async fn stop_mic(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Set push-to-talk active state (for UI PTT button fallback).
 #[tauri::command]
-pub async fn set_ptt(state: State<'_, AppState>, active: bool, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn set_ptt(
+    state: State<'_, AppState>,
+    active: bool,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     state.mic_input.set_ptt(active);
     let _ = app.emit("ptt_state_changed", serde_json::json!({ "active": active }));
     Ok(())
@@ -51,20 +54,29 @@ pub async fn set_ptt(state: State<'_, AppState>, active: bool, app: tauri::AppHa
 #[tauri::command]
 pub async fn start_voice_recording(state: State<'_, AppState>) -> Result<(), String> {
     let path = std::env::temp_dir()
-        .join(format!("voice_track_{}.wav", chrono::Utc::now().timestamp()))
+        .join(format!(
+            "voice_track_{}.wav",
+            chrono::Utc::now().timestamp()
+        ))
         .to_string_lossy()
         .to_string();
-    state.voice_recording_path.lock().unwrap().replace(path.clone());
+    state
+        .voice_recording_path
+        .lock()
+        .unwrap()
+        .replace(path.clone());
     state.mic_input.start_recording(&path)
 }
 
 /// Stop recording a voice track; returns the file path and duration.
 #[tauri::command]
-pub async fn stop_voice_recording(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+pub async fn stop_voice_recording(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let duration_ms = state.mic_input.stop_recording()?;
-    let file_path = state.voice_recording_path.lock().unwrap().take()
+    let file_path = state
+        .voice_recording_path
+        .lock()
+        .unwrap()
+        .take()
         .unwrap_or_default();
     Ok(serde_json::json!({
         "filePath": file_path,

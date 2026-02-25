@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::{
     db::{
-        local::{SamDbConfig, get_sam_db_config, save_sam_db_config},
+        local::{get_sam_db_config, save_sam_db_config, SamDbConfig},
         sam::{connect, get_categories, SamCategory},
     },
     state::AppState,
@@ -36,7 +36,13 @@ pub struct SamDbStatus {
 /// Test a SAM DB connection without saving or storing it.
 #[tauri::command]
 pub async fn test_sam_db_connection(args: SamDbConnectArgs) -> Result<SamDbStatus, String> {
-    let url = build_mysql_url(&args.host, args.port, &args.username, &args.password, &args.database);
+    let url = build_mysql_url(
+        &args.host,
+        args.port,
+        &args.username,
+        &args.password,
+        &args.database,
+    );
     match connect(&url).await {
         Ok(pool) => {
             pool.close().await;
@@ -63,9 +69,17 @@ pub async fn connect_sam_db(
     args: SamDbConnectArgs,
     state: State<'_, AppState>,
 ) -> Result<SamDbStatus, String> {
-    let url = build_mysql_url(&args.host, args.port, &args.username, &args.password, &args.database);
+    let url = build_mysql_url(
+        &args.host,
+        args.port,
+        &args.username,
+        &args.password,
+        &args.database,
+    );
 
-    let pool = connect(&url).await.map_err(|e| format!("SAM DB connect failed: {e}"))?;
+    let pool = connect(&url)
+        .await
+        .map_err(|e| format!("SAM DB connect failed: {e}"))?;
 
     // Store pool in AppState
     *state.sam_db.write().await = Some(pool);
@@ -77,7 +91,9 @@ pub async fn connect_sam_db(
             port: args.port,
             username: args.username.clone(),
             database_name: args.database.clone(),
-            auto_connect: args.auto_connect,
+            // Reliability-first behavior: once a connection succeeds, always
+            // persist auto-connect enabled for the next app launch.
+            auto_connect: true,
             path_prefix_from: args.path_prefix_from.clone().unwrap_or_default(),
             path_prefix_to: args.path_prefix_to.clone().unwrap_or_default(),
         };
@@ -107,10 +123,7 @@ pub async fn disconnect_sam_db(state: State<'_, AppState>) -> Result<(), String>
 /// Return the saved SAM DB config (no password).
 #[tauri::command]
 pub async fn get_sam_db_config_cmd(state: State<'_, AppState>) -> Result<SamDbConfig, String> {
-    let local = state
-        .local_db
-        .as_ref()
-        .ok_or("Local DB not initialised")?;
+    let local = state.local_db.as_ref().ok_or("Local DB not initialised")?;
     get_sam_db_config(local)
         .await
         .map_err(|e| format!("DB error: {e}"))
@@ -124,10 +137,7 @@ pub async fn save_sam_db_config_cmd(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let local = state
-        .local_db
-        .as_ref()
-        .ok_or("Local DB not initialised")?;
+    let local = state.local_db.as_ref().ok_or("Local DB not initialised")?;
     save_sam_db_config(local, &config, &password)
         .await
         .map_err(|e| format!("DB error: {e}"))

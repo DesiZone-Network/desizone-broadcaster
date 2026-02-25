@@ -1,9 +1,6 @@
 use tauri::State;
 
-use crate::{
-    stream::icecast::IcecastConfig,
-    state::AppState,
-};
+use crate::{state::AppState, stream::icecast::IcecastConfig};
 
 /// Start streaming to an Icecast server.
 #[tauri::command]

@@ -3,7 +3,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type DeckId = "deck_a" | "deck_b" | "sound_fx" | "aux_1" | "voice_fx";
+export type DeckId = "deck_a" | "deck_b" | "sound_fx" | "aux_1" | "aux_2" | "voice_fx";
 
 export type FadeCurve =
   | "linear"
@@ -13,17 +13,25 @@ export type FadeCurve =
   | "constant_power";
 
 export type CrossfadeMode = "overlap" | "segue" | "instant";
+export type CrossfadeTriggerMode = "auto_detect_db" | "fixed_point_ms" | "manual";
 
 export interface CrossfadeConfig {
   fade_out_enabled: boolean;
   fade_out_curve: FadeCurve;
   fade_out_time_ms: number;
+  fade_out_level_pct: number;
   fade_in_enabled: boolean;
   fade_in_curve: FadeCurve;
   fade_in_time_ms: number;
+  fade_in_level_pct: number;
   crossfade_mode: CrossfadeMode;
+  trigger_mode: CrossfadeTriggerMode;
+  fixed_crossfade_ms: number;
   auto_detect_enabled: boolean;
   auto_detect_db: number;
+  min_fade_time_ms: number;
+  max_fade_time_ms: number;
+  skip_short_tracks_secs: number | null;
   auto_detect_min_ms: number;
   auto_detect_max_ms: number;
   fixed_crossfade_point_ms: number | null;
@@ -40,6 +48,13 @@ export interface DeckStateEvent {
   state: string;
   position_ms: number;
   duration_ms: number;
+  song_id?: number | null;
+  file_path?: string | null;
+  playback_rate?: number;
+  pitch_pct?: number;
+  tempo_pct?: number;
+  decoder_buffer_ms: number;
+  rms_db_pre_fader: number;
 }
 
 export interface VuEvent {
@@ -95,6 +110,7 @@ export interface QueueEntry {
   request_id: number;
   plotw: number;        // 0=Song/PLO, 1=VoiceBreak/TW
   dedication: number;
+  song?: SamSong;       // hydrated from songlist when available
 }
 
 export interface HistoryEntry {
@@ -134,6 +150,51 @@ export interface ChannelDspSettings {
   agc_pre_emphasis: string;
   comp_enabled: boolean;
   comp_settings_json: string | null;
+  pipeline_settings_json?: string | null;
+}
+
+export interface BandConfig {
+  threshold_db: number;
+  ratio: number;
+  knee_db: number;
+  attack_ms: number;
+  release_ms: number;
+  makeup_db: number;
+}
+
+export interface PipelineSettings {
+  eq: {
+    low_gain_db: number;
+    low_freq_hz: number;
+    mid_gain_db: number;
+    mid_freq_hz: number;
+    mid_q: number;
+    high_gain_db: number;
+    high_freq_hz: number;
+  };
+  agc: {
+    enabled: boolean;
+    gate_db: number;
+    max_gain_db: number;
+    target_db: number;
+    attack_ms: number;
+    release_ms: number;
+    pre_emphasis: "none" | "us50" | "us75";
+  };
+  multiband: {
+    enabled: boolean;
+    bands: BandConfig[];
+  };
+  dual_band: {
+    enabled: boolean;
+    crossover_hz: number;
+    lf_band: BandConfig;
+    hf_band: BandConfig;
+  };
+  clipper: {
+    enabled: boolean;
+    ceiling_db: number;
+  };
 }
 
 // ── Deck control ─────────────────────────────────────────────────────────────
@@ -151,6 +212,12 @@ export const seekDeck = (deck: DeckId, positionMs: number) =>
 export const setChannelGain = (deck: DeckId, gain: number) =>
   invoke<void>("set_channel_gain", { deck, gain });
 
+export const setDeckPitch = (deck: DeckId, pitchPct: number) =>
+  invoke<void>("set_deck_pitch", { deck, pitchPct });
+
+export const setDeckTempo = (deck: DeckId, tempoPct: number) =>
+  invoke<void>("set_deck_tempo", { deck, tempoPct });
+
 export const getDeckState = (deck: DeckId) =>
   invoke<DeckStateEvent | null>("get_deck_state", { deck });
 
@@ -167,12 +234,18 @@ export const setCrossfadeConfig = (config: CrossfadeConfig) =>
 export const startCrossfade = (outgoing: DeckId, incoming: DeckId) =>
   invoke<void>("start_crossfade", { outgoing, incoming });
 
+export const setManualCrossfade = (position: number) =>
+  invoke<void>("set_manual_crossfade", { position });
+
+export const triggerManualFade = (direction: "a_to_b" | "b_to_a", durationMs: number) =>
+  invoke<void>("trigger_manual_fade", { direction, durationMs });
+
 export const getFadeCurvePreview = (curve: FadeCurve, steps = 50) =>
   invoke<CurvePoint[]>("get_fade_curve_preview", { curve, steps });
 
 // ── DSP ──────────────────────────────────────────────────────────────────────
 
-export const getChannelDsp = (channel: DeckId) =>
+export const getChannelDsp = (channel: DeckId | "master") =>
   invoke<ChannelDspSettings | null>("get_channel_dsp", { channel });
 
 export const setChannelEq = (
@@ -184,7 +257,7 @@ export const setChannelEq = (
   invoke<void>("set_channel_eq", { channel, lowGainDb, midGainDb, highGainDb });
 
 export const setChannelAgc = (
-  channel: DeckId,
+  channel: DeckId | "master",
   enabled: boolean,
   gateDb?: number,
   maxGainDb?: number
@@ -195,6 +268,12 @@ export const setChannelAgc = (
     gateDb: gateDb ?? null,
     maxGainDb: maxGainDb ?? null,
   });
+
+export const setPipelineSettings = (
+  channel: DeckId | "master",
+  settings: PipelineSettings
+) =>
+  invoke<void>("set_pipeline_settings", { channel, settings });
 
 // ── Cue points ───────────────────────────────────────────────────────────────
 
@@ -224,8 +303,40 @@ export const removeFromQueue = (queueId: number) =>
 export const completeQueueItem = (queueId: number, songId: number) =>
   invoke<void>("complete_queue_item", { queueId, songId });
 
-export const searchSongs = (query: string, limit = 50, offset = 0) =>
-  invoke<SamSong[]>("search_songs", { query, limit, offset });
+export interface SearchSongsOptions {
+  searchArtist?: boolean;
+  searchTitle?: boolean;
+  searchAlbum?: boolean;
+  searchFilename?: boolean;
+  songType?: string | null;
+}
+
+export const searchSongs = (
+  query: string,
+  limit = 500,
+  offset = 0,
+  options?: SearchSongsOptions
+) =>
+  invoke<SamSong[]>("search_songs", {
+    query,
+    limit,
+    offset,
+    searchArtist: options?.searchArtist ?? true,
+    searchTitle: options?.searchTitle ?? true,
+    searchAlbum: options?.searchAlbum ?? false,
+    searchFilename: options?.searchFilename ?? false,
+    songType: options?.songType ?? null,
+  });
+
+export const getSongsByWeightRange = (
+  minWeight: number,
+  maxWeight: number,
+  limit = 500,
+  offset = 0
+) =>
+  invoke<SamSong[]>("get_songs_by_weight_range", { minWeight, maxWeight, limit, offset });
+
+export const getSongTypes = () => invoke<string[]>("get_song_types");
 
 export const getHistory = (limit = 20) =>
   invoke<HistoryEntry[]>("get_history", { limit });
@@ -266,6 +377,9 @@ export interface SamDbStatus {
 export interface SamCategory {
   id: number;
   catname: string;
+  parent_id: number;
+  levelindex: number;
+  itemindex: number;
 }
 
 /** Test a connection without persisting anything. */
@@ -292,9 +406,13 @@ export const saveSamDbConfig = (config: SamDbConfig, password: string) =>
 export const getSamDbStatus = () =>
   invoke<SamDbStatus>("get_sam_db_status");
 
-/** Return SAM categories (empty array if catlist table absent). */
+/** Return SAM categories (supports both `category` and legacy `catlist`). */
 export const getSamCategories = () =>
   invoke<SamCategory[]>("get_sam_categories");
+
+/** Return songs belonging to a SAM category via the categorylist join table. */
+export const getSongsInCategory = (categoryId: number, limit = 500, offset = 0) =>
+  invoke<SamSong[]>("get_songs_in_category", { categoryId, limit, offset });
 
 // ── Streaming ────────────────────────────────────────────────────────────────
 
@@ -364,7 +482,7 @@ export interface SongDetail extends SamSong {
 }
 
 export const getSong = (songId: number) =>
-  invoke<SongDetail>("get_song", { songId });
+  invoke<SamSong | null>("get_song", { songId });
 
 export const updateSong = (songId: number, fields: Partial<SamSong>) =>
   invoke<void>("update_song", { songId, fields });
@@ -596,8 +714,66 @@ export type DjMode = "autodj" | "assisted" | "manual";
 export const getDjMode = (): Promise<DjMode> =>
   invoke<DjMode>("get_dj_mode");
 
-export const setDjMode = (mode: DjMode): Promise<void> =>
-  invoke<void>("set_dj_mode", { mode });
+export const setDjMode = async (mode: DjMode): Promise<void> => {
+  await invoke<void>("set_dj_mode", { mode });
+  window.dispatchEvent(new CustomEvent<DjMode>("dj_mode_changed", { detail: mode }));
+};
+
+export type AutoTransitionMode =
+  | "full_intro_outro"
+  | "fade_at_outro_start"
+  | "fixed_full_track"
+  | "fixed_skip_silence"
+  | "fixed_start_center_skip_silence";
+
+export type AutodjTransitionEngine = "sam_classic" | "mixxx_planner";
+
+export interface MixxxPlannerConfig {
+  enabled: boolean;
+  mode: AutoTransitionMode;
+  transition_time_sec: number;
+  min_track_duration_ms: number;
+}
+
+export interface AutoTransitionConfig {
+  engine: AutodjTransitionEngine;
+  mixxx_planner_config: MixxxPlannerConfig;
+}
+
+export interface TransitionDecisionDebug {
+  engine: string;
+  from_deck: string | null;
+  to_deck: string | null;
+  trigger_mode: string | null;
+  reason: string;
+  outgoing_rms_db: number | null;
+  threshold_db: number | null;
+  outgoing_remaining_ms: number | null;
+  fixed_point_ms: number | null;
+  hold_ms: number | null;
+  skip_cause: string | null;
+}
+
+export const getAutoDjTransitionConfig = (): Promise<AutoTransitionConfig> =>
+  invoke<AutoTransitionConfig>("get_autodj_transition_config");
+
+export const setAutoDjTransitionConfig = (config: AutoTransitionConfig): Promise<void> =>
+  invoke<void>("set_autodj_transition_config", { config });
+
+export const recalculateAutoDjPlanNow = (): Promise<void> =>
+  invoke<void>("recalculate_autodj_plan_now");
+
+export const getLastTransitionDecision = (): Promise<TransitionDecisionDebug> =>
+  invoke<TransitionDecisionDebug>("get_last_transition_decision");
+
+export const onDjModeChanged = (cb: (mode: DjMode) => void) => {
+  const handler = (e: Event) => {
+    const ev = e as CustomEvent<DjMode>;
+    cb(ev.detail);
+  };
+  window.addEventListener("dj_mode_changed", handler);
+  return () => window.removeEventListener("dj_mode_changed", handler);
+};
 
 // ── Rotation Rules ────────────────────────────────────────────────────────────
 
@@ -610,6 +786,49 @@ export interface RotationRuleRow {
   priority: number;
 }
 
+export type ClockwheelSlotKind = "category" | "directory" | "request";
+
+export type ClockwheelSelectionMethod =
+  | "weighted"
+  | "priority"
+  | "random"
+  | "most_recently_played_song"
+  | "least_recently_played_song"
+  | "most_recently_played_artist"
+  | "least_recently_played_artist"
+  | "lemming"
+  | "playlist_order";
+
+export interface ClockwheelSlot {
+  id: string;
+  kind: ClockwheelSlotKind;
+  target: string;
+  selection_method: ClockwheelSelectionMethod;
+  enforce_rules: boolean;
+  start_hour: number | null;
+  end_hour: number | null;
+  active_days: number[];
+}
+
+export interface ClockwheelRules {
+  no_same_album_minutes: number;
+  no_same_artist_minutes: number;
+  no_same_title_minutes: number;
+  no_same_track_minutes: number;
+  keep_songs_in_queue: number;
+  use_ghost_queue: boolean;
+  cache_queue_count: boolean;
+  enforce_playlist_rotation_rules: boolean;
+}
+
+export interface ClockwheelConfig {
+  rules: ClockwheelRules;
+  on_play_reduce_weight_by: number;
+  on_request_increase_weight_by: number;
+  verbose_logging: boolean;
+  slots: ClockwheelSlot[];
+}
+
 export const getRotationRules = (): Promise<RotationRuleRow[]> =>
   invoke<RotationRuleRow[]>("get_rotation_rules");
 
@@ -618,6 +837,15 @@ export const saveRotationRule = (rule: RotationRuleRow): Promise<number> =>
 
 export const deleteRotationRule = (id: number): Promise<void> =>
   invoke<void>("delete_rotation_rule", { id });
+
+export const getClockwheelConfig = (): Promise<ClockwheelConfig> =>
+  invoke<ClockwheelConfig>("get_clockwheel_config");
+
+export const saveClockwheelConfig = (config: ClockwheelConfig): Promise<void> =>
+  invoke<void>("save_clockwheel_config", { config });
+
+export const getSongDirectories = (limit = 3000): Promise<string[]> =>
+  invoke<string[]>("get_song_directories", { limit });
 
 export interface SongCandidate {
   song_id: number;
@@ -632,6 +860,16 @@ export interface SongCandidate {
 
 export const getNextAutoDjTrack = (): Promise<SongCandidate | null> =>
   invoke<SongCandidate | null>("get_next_autodj_track");
+
+export interface EnqueuedClockwheelTrack {
+  queue_id: number;
+  song: SongCandidate;
+}
+
+export const enqueueNextClockwheelTrack = (
+  slotId?: string
+): Promise<EnqueuedClockwheelTrack | null> =>
+  invoke<EnqueuedClockwheelTrack | null>("enqueue_next_clockwheel_track", { slotId: slotId ?? null });
 
 // ── Playlists ─────────────────────────────────────────────────────────────────
 
@@ -780,9 +1018,3 @@ export const onShowTriggered = (
   cb: (event: ShowTriggeredEvent) => void
 ): Promise<UnlistenFn> =>
   listen<ShowTriggeredEvent>("show_triggered", (e) => cb(e.payload));
-
-export const onDjModeChanged = (
-  cb: (mode: DjMode) => void
-): Promise<UnlistenFn> =>
-  listen<{ mode: DjMode }>("dj_mode_changed", (e) => cb(e.payload.mode));
-

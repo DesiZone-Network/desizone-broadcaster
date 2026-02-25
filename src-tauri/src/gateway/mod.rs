@@ -5,4 +5,3 @@ pub mod sync;
 
 pub use client::{GatewayClient, GatewayMessage};
 pub use remote_dj::RemoteDjCommand;
-

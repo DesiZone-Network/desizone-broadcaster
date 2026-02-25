@@ -19,13 +19,14 @@ const SOURCES: ChannelNode[] = [
     { id: "deck_b", label: "DECK B", x: 20, y: 80, color: "#06b6d4" },
     { id: "sound_fx", label: "SFX", x: 20, y: 140, color: "#8b5cf6" },
     { id: "aux_1", label: "AUX 1", x: 20, y: 200, color: "#22c55e" },
-    { id: "voice_fx", label: "VOICE", x: 20, y: 260, color: "#f97316" },
+    { id: "aux_2", label: "AUX 2", x: 20, y: 260, color: "#ec4899" },
+    { id: "voice_fx", label: "VOICE", x: 20, y: 320, color: "#f97316" },
 ];
 
 const DSP_STAGES = ["EQ", "AGC", "DSP"];
 
 const W = 580;
-const H = 320;
+const H = 380;
 const SRC_W = 56;
 const SRC_H = 28;
 const NODE_W = 36;

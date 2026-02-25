@@ -6,10 +6,7 @@ use tauri::State;
 use crate::{
     state::AppState,
     stats::icecast_stats::{self, ListenerSnapshot},
-    stream::{
-        broadcaster::EncoderRuntimeState,
-        encoder_manager::EncoderConfig,
-    },
+    stream::{broadcaster::EncoderRuntimeState, encoder_manager::EncoderConfig},
 };
 
 // ── Encoder CRUD ──────────────────────────────────────────────────────────────
@@ -62,10 +59,7 @@ pub async fn stop_all_encoders(state: State<'_, AppState>) -> Result<(), String>
 // ── Connection test ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn test_encoder_connection(
-    id: i64,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
+pub async fn test_encoder_connection(id: i64, state: State<'_, AppState>) -> Result<bool, String> {
     match state.encoder_manager.test_connection(id).await {
         Ok(()) => Ok(true),
         Err(e) => Err(e),
@@ -75,7 +69,9 @@ pub async fn test_encoder_connection(
 // ── Runtime state ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn get_encoder_runtime(state: State<'_, AppState>) -> Result<Vec<EncoderRuntimeState>, String> {
+pub async fn get_encoder_runtime(
+    state: State<'_, AppState>,
+) -> Result<Vec<EncoderRuntimeState>, String> {
     Ok(state.encoder_manager.get_all_runtime())
 }
 
@@ -84,19 +80,13 @@ pub async fn get_encoder_runtime(state: State<'_, AppState>) -> Result<Vec<Encod
 /// Recording is managed via the same start/stop_encoder commands (file encoders).
 /// Convenience aliases for explicit UI calls.
 #[tauri::command]
-pub async fn start_recording(
-    encoder_id: i64,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn start_recording(encoder_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     state.encoder_manager.start_encoder(encoder_id, None);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_recording(
-    encoder_id: i64,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn stop_recording(encoder_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     state.encoder_manager.stop_encoder(encoder_id);
     Ok(())
 }

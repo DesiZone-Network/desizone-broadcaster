@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Wifi, WifiOff, Radio } from "lucide-react";
-import { onVuMeter, VuEvent } from "../../lib/bridge";
+import { getDjMode, onDjModeChanged, onVuMeter, VuEvent, type DjMode } from "../../lib/bridge";
 
 interface Props {
   stationName?: string;
@@ -80,6 +80,7 @@ function Clock() {
 
 export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamConnected }: Props) {
   const [masterVu, setMasterVu] = useState<VuEvent | null>(null);
+  const [djMode, setDjMode] = useState<DjMode>("manual");
 
   useEffect(() => {
     const unsub = onVuMeter((e) => {
@@ -89,6 +90,26 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
     });
     return () => { unsub.then((fn) => fn()); };
   }, []);
+
+  useEffect(() => {
+    getDjMode().then(setDjMode).catch(() => { });
+    const off = onDjModeChanged((mode) => setDjMode(mode));
+    const id = setInterval(() => {
+      getDjMode().then(setDjMode).catch(() => { });
+    }, 5000);
+    return () => {
+      off();
+      clearInterval(id);
+    };
+  }, []);
+
+  const modeLabel = djMode === "autodj" ? "AUTODJ" : djMode === "assisted" ? "ASSISTED" : "MANUAL";
+  const modeStyle =
+    djMode === "autodj"
+      ? { background: "rgba(34,197,94,.15)", border: "1px solid rgba(34,197,94,.45)", color: "var(--green)" }
+      : djMode === "assisted"
+      ? { background: "var(--amber-glow)", border: "1px solid var(--amber-dim)", color: "var(--amber)" }
+      : { background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--text-muted)" };
 
   return (
     <header
@@ -138,6 +159,10 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
           style={!streamConnected ? { background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--text-muted)" } : {}}>
           {streamConnected ? <Wifi size={10} /> : <WifiOff size={10} />}
           {streamConnected ? "STREAMING" : "NO STREAM"}
+        </div>
+
+        <div className="badge" style={modeStyle}>
+          {modeLabel}
         </div>
       </div>
 

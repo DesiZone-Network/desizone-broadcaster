@@ -17,8 +17,8 @@ use ringbuf::traits::Consumer as _;
 use tokio::sync::oneshot;
 
 use super::{
-    encoder_manager::{EncoderConfig, EncoderManager, FileRotation},
     broadcaster::EncoderStatus,
+    encoder_manager::{EncoderConfig, EncoderManager, FileRotation},
 };
 
 /// Async recording loop — runs inside the encoder task.
@@ -28,13 +28,9 @@ pub async fn record_loop_async(
     stop_rx: &mut oneshot::Receiver<()>,
     manager: &EncoderManager,
 ) -> Result<(), String> {
-    let output_dir = config
-        .file_output_path
-        .as_deref()
-        .unwrap_or("./recordings");
+    let output_dir = config.file_output_path.as_deref().unwrap_or("./recordings");
 
-    std::fs::create_dir_all(output_dir)
-        .map_err(|e| format!("Cannot create recording dir: {e}"))?;
+    std::fs::create_dir_all(output_dir).map_err(|e| format!("Cannot create recording dir: {e}"))?;
 
     let id = config.id;
     let max_bytes = config.file_max_size_mb * 1024 * 1024;
@@ -112,11 +108,7 @@ pub async fn record_loop_async(
             );
 
             // Update UI
-            let new_file = state
-                .current_path
-                .to_str()
-                .unwrap_or_default()
-                .to_string();
+            let new_file = state.current_path.to_str().unwrap_or_default().to_string();
             // Note: in a full implementation, emit a `recording_rotation` Tauri event here
         }
 
@@ -259,7 +251,20 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
         year += 1;
     }
     let leap = is_leap(year);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u64;
     for &md in &month_days {
         if days < md {
@@ -277,7 +282,13 @@ fn is_leap(y: u64) -> bool {
 
 fn slugify(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string()

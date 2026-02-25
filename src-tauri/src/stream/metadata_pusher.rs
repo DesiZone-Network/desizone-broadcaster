@@ -30,10 +30,7 @@ pub async fn push_icecast_metadata(config: &EncoderConfig, song: &str) -> Result
         log::info!("Icecast metadata updated: {song}");
         Ok(())
     } else {
-        Err(format!(
-            "Icecast metadata: HTTP {}",
-            resp.status()
-        ))
+        Err(format!("Icecast metadata: HTTP {}", resp.status()))
     }
 }
 
@@ -45,9 +42,8 @@ pub async fn push_shoutcast_metadata(config: &EncoderConfig, song: &str) -> Resu
     let password = config.server_password.as_deref().unwrap_or("");
     let encoded_song = urlencoding_encode(song);
 
-    let url = format!(
-        "http://{host}:{port}/admin.cgi?pass={password}&mode=updinfo&song={encoded_song}"
-    );
+    let url =
+        format!("http://{host}:{port}/admin.cgi?pass={password}&mode=updinfo&song={encoded_song}");
 
     let client = reqwest::Client::new();
     let resp = client

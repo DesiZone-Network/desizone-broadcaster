@@ -5,11 +5,10 @@
 /// ring buffer that the main mixer reads as the Voice FX channel.
 ///
 /// Voice track recording writes raw samples to a temp WAV file via `hound`.
-
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use hound::{WavWriter, WavSpec};
+use hound::{WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::dsp::{deesser::Deesser, reverb::Reverb};
@@ -79,7 +78,8 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
                     let is_default = default_name.as_deref() == Some(name.as_str());
                     AudioDevice { name, is_default }
                 })
-            }).collect()
+            })
+            .collect()
         })
         .unwrap_or_default()
 }
@@ -183,19 +183,20 @@ impl MicInput {
                 .ok_or("No default input device found")?
         };
 
-        let supported = device.default_input_config()
-            .map_err(|e| e.to_string())?;
+        let supported = device.default_input_config().map_err(|e| e.to_string())?;
 
         let state = Arc::clone(&self.state);
 
-        let stream = device.build_input_stream(
-            &supported.config(),
-            move |data: &[f32], _info: &cpal::InputCallbackInfo| {
-                Self::audio_callback(data, &state);
-            },
-            |e| log::error!("Mic input error: {e}"),
-            None,
-        ).map_err(|e| e.to_string())?;
+        let stream = device
+            .build_input_stream(
+                &supported.config(),
+                move |data: &[f32], _info: &cpal::InputCallbackInfo| {
+                    Self::audio_callback(data, &state);
+                },
+                |e| log::error!("Mic input error: {e}"),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
 
         stream.play().map_err(|e| e.to_string())?;
         *self.stream.lock().unwrap() = Some(stream);
@@ -270,8 +271,7 @@ impl MicInput {
             sample_format: hound::SampleFormat::Float,
         };
         let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
-        let writer = WavWriter::new(std::io::BufWriter::new(f), spec)
-            .map_err(|e| e.to_string())?;
+        let writer = WavWriter::new(std::io::BufWriter::new(f), spec).map_err(|e| e.to_string())?;
         st.wav_writer = Some(writer);
         st.recording = true;
         Ok(())

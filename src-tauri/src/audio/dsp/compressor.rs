@@ -49,7 +49,13 @@ impl Band {
         let attack_coeff = time_coeff(config.attack_ms, sample_rate);
         let release_coeff = time_coeff(config.release_ms, sample_rate);
         let makeup_gain = db_to_linear(config.makeup_db);
-        Self { config, detector: 0.0, attack_coeff, release_coeff, makeup_gain }
+        Self {
+            config,
+            detector: 0.0,
+            attack_coeff,
+            release_coeff,
+            makeup_gain,
+        }
     }
 
     fn reconfigure(&mut self, sample_rate: f32, config: BandConfig) {
@@ -63,7 +69,11 @@ impl Band {
     fn process(&mut self, sample: f32) -> f32 {
         let abs_in = sample.abs();
 
-        let coeff = if abs_in > self.detector { self.attack_coeff } else { self.release_coeff };
+        let coeff = if abs_in > self.detector {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
         self.detector = coeff * self.detector + (1.0 - coeff) * abs_in;
 
         let level_db = linear_to_db(self.detector.max(1e-10));
@@ -90,7 +100,11 @@ impl Band {
                 (t - half_w + (excess + half_w) / interp_ratio) - level_db
             }
         } else {
-            if excess > 0.0 { (t + excess / r) - level_db } else { 0.0 }
+            if excess > 0.0 {
+                (t + excess / r) - level_db
+            } else {
+                0.0
+            }
         }
     }
 }
@@ -110,11 +124,31 @@ impl Default for MultibandConfig {
         Self {
             enabled: false,
             bands: [
-                BandConfig { threshold_db: -20.0, ratio: 2.0, ..Default::default() },
-                BandConfig { threshold_db: -20.0, ratio: 2.5, ..Default::default() },
-                BandConfig { threshold_db: -20.0, ratio: 3.0, ..Default::default() },
-                BandConfig { threshold_db: -20.0, ratio: 3.0, ..Default::default() },
-                BandConfig { threshold_db: -20.0, ratio: 2.0, ..Default::default() },
+                BandConfig {
+                    threshold_db: -20.0,
+                    ratio: 2.0,
+                    ..Default::default()
+                },
+                BandConfig {
+                    threshold_db: -20.0,
+                    ratio: 2.5,
+                    ..Default::default()
+                },
+                BandConfig {
+                    threshold_db: -20.0,
+                    ratio: 3.0,
+                    ..Default::default()
+                },
+                BandConfig {
+                    threshold_db: -20.0,
+                    ratio: 3.0,
+                    ..Default::default()
+                },
+                BandConfig {
+                    threshold_db: -20.0,
+                    ratio: 2.0,
+                    ..Default::default()
+                },
             ],
         }
     }
@@ -166,7 +200,12 @@ impl MultibandCompressor {
     pub fn new(sample_rate: f32, config: MultibandConfig) -> Self {
         let crossovers = CROSSOVERS_HZ.map(|hz| CrossoverPair::new(sample_rate, hz));
         let bands = std::array::from_fn(|i| Band::new(sample_rate, config.bands[i].clone()));
-        Self { config, sample_rate, crossovers, bands }
+        Self {
+            config,
+            sample_rate,
+            crossovers,
+            bands,
+        }
     }
 
     pub fn with_defaults(sample_rate: f32) -> Self {
@@ -227,8 +266,16 @@ impl Default for DualBandConfig {
         Self {
             enabled: false,
             crossover_hz: 800.0,
-            lf_band: BandConfig { threshold_db: -18.0, ratio: 4.0, ..Default::default() },
-            hf_band: BandConfig { threshold_db: -18.0, ratio: 3.0, ..Default::default() },
+            lf_band: BandConfig {
+                threshold_db: -18.0,
+                ratio: 4.0,
+                ..Default::default()
+            },
+            hf_band: BandConfig {
+                threshold_db: -18.0,
+                ratio: 3.0,
+                ..Default::default()
+            },
         }
     }
 }
@@ -246,7 +293,13 @@ impl DualBandCompressor {
         let crossover = CrossoverPair::new(sample_rate, config.crossover_hz);
         let lf = Band::new(sample_rate, config.lf_band.clone());
         let hf = Band::new(sample_rate, config.hf_band.clone());
-        Self { config, sample_rate, crossover, lf, hf }
+        Self {
+            config,
+            sample_rate,
+            crossover,
+            lf,
+            hf,
+        }
     }
 
     pub fn with_defaults(sample_rate: f32) -> Self {
@@ -255,8 +308,10 @@ impl DualBandCompressor {
 
     pub fn set_config(&mut self, config: DualBandConfig) {
         self.crossover = CrossoverPair::new(self.sample_rate, config.crossover_hz);
-        self.lf.reconfigure(self.sample_rate, config.lf_band.clone());
-        self.hf.reconfigure(self.sample_rate, config.hf_band.clone());
+        self.lf
+            .reconfigure(self.sample_rate, config.lf_band.clone());
+        self.hf
+            .reconfigure(self.sample_rate, config.hf_band.clone());
         self.config = config;
     }
 
@@ -294,7 +349,10 @@ pub struct ClipperConfig {
 
 impl Default for ClipperConfig {
     fn default() -> Self {
-        Self { enabled: true, ceiling_db: -0.1 }
+        Self {
+            enabled: true,
+            ceiling_db: -0.1,
+        }
     }
 }
 
@@ -306,7 +364,10 @@ pub struct Clipper {
 impl Clipper {
     pub fn new(config: ClipperConfig) -> Self {
         let ceiling_linear = db_to_linear(config.ceiling_db);
-        Self { config, ceiling_linear }
+        Self {
+            config,
+            ceiling_linear,
+        }
     }
 
     pub fn set_config(&mut self, config: ClipperConfig) {
@@ -348,7 +409,13 @@ fn time_coeff(time_ms: f32, sample_rate: f32) -> f32 {
 }
 
 fn unity_coeffs() -> Coefficients<f32> {
-    Coefficients { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 }
+    Coefficients {
+        b0: 1.0,
+        b1: 0.0,
+        b2: 0.0,
+        a1: 0.0,
+        a2: 0.0,
+    }
 }
 
 #[cfg(test)]
@@ -357,7 +424,10 @@ mod tests {
 
     #[test]
     fn clipper_hard_limits() {
-        let clipper = Clipper::new(ClipperConfig { enabled: true, ceiling_db: -6.0 });
+        let clipper = Clipper::new(ClipperConfig {
+            enabled: true,
+            ceiling_db: -6.0,
+        });
         let ceiling = db_to_linear(-6.0);
         assert!(clipper.process(2.0) <= ceiling + 1e-6);
         assert!(clipper.process(-2.0) >= -ceiling - 1e-6);
@@ -365,7 +435,10 @@ mod tests {
 
     #[test]
     fn disabled_compressor_passthrough() {
-        let config = MultibandConfig { enabled: false, ..Default::default() };
+        let config = MultibandConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let mut comp = MultibandCompressor::new(44100.0, config);
         let input = 0.42_f32;
         assert!((comp.process_mono(input) - input).abs() < 1e-6);
@@ -391,6 +464,9 @@ mod tests {
             comp.process_mono(0.9);
         }
         let loud = comp.process_mono(0.9);
-        assert!(loud.abs() < 0.9, "compressor should reduce loud signal: {loud}");
+        assert!(
+            loud.abs() < 0.9,
+            "compressor should reduce loud signal: {loud}"
+        );
     }
 }

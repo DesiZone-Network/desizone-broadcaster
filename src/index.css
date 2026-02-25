@@ -629,6 +629,29 @@ canvas.vu-canvas {
     transform: translate(-50%, -50%) scale(1.2);
 }
 
+/* ── Marquee text ─────────────────────────────────────────────────────────── */
+.marquee-line {
+    display: flex;
+    gap: 24px;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.marquee-track {
+    display: inline-block;
+    min-width: max-content;
+    animation: dz-marquee 10s linear infinite;
+}
+
+@keyframes dz-marquee {
+    from {
+        transform: translateX(0);
+    }
+    to {
+        transform: translateX(calc(-100% - 24px));
+    }
+}
+
 /* ── Scrollbar ─────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
     width: 6px;
@@ -1695,6 +1718,164 @@ canvas.vu-canvas {
 .rr-add-btn:disabled {
     opacity: .4;
     cursor: not-allowed;
+}
+
+.cw-rules-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.cw-rule-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.cw-check-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px 14px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.cw-check-grid label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.cw-slot-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.cw-slot-row {
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-input);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.cw-slot-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.cw-slot-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.cw-slot-add-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 24px;
+    border-radius: 5px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-panel);
+    color: var(--green, #10b981);
+    cursor: pointer;
+    transition: background .15s;
+}
+
+.cw-slot-add-btn:hover {
+    background: rgba(16, 185, 129, .12);
+}
+
+.cw-slot-add-btn:disabled {
+    opacity: .5;
+    cursor: not-allowed;
+}
+
+.cw-slot-head strong {
+    font-size: 11px;
+    color: var(--text-primary);
+    letter-spacing: .02em;
+}
+
+.cw-slot-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 10px;
+}
+
+.cw-slot-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.cw-inline-check {
+    justify-content: end;
+}
+
+.cw-inline-check input {
+    margin-right: 6px;
+}
+
+.cw-days {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.cw-day-btn {
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-panel);
+    color: var(--text-dim);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.cw-day-btn.active {
+    border-color: var(--amber);
+    color: var(--amber);
+    background: var(--amber-glow);
+}
+
+.cw-preview-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.cw-preview {
+    width: 100%;
+    resize: vertical;
+    min-height: 120px;
+    border-radius: 6px;
+    border: 1px solid var(--border-default);
+    background: #11151f;
+    color: #9bd3ff;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    padding: 9px 10px;
+}
+
+.cw-status {
+    font-size: 11px;
+    color: var(--green);
 }
 
 /* ── WeeklyCalendar ───────────────────────────────────────────────────────── */

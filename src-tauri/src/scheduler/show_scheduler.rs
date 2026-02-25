@@ -1,3 +1,4 @@
+use chrono::{Datelike, TimeZone};
 /// Show Scheduler
 ///
 /// Runs as a Tokio background task. Reads the schedule from the local DB
@@ -5,7 +6,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
-use chrono::{Datelike, TimeZone};
 
 // ── Data model ────────────────────────────────────────────────────────────────
 
@@ -187,9 +187,9 @@ pub async fn get_upcoming_events(
                 let candidate = candidate_date.and_hms_opt(h, m, 0);
                 if let Some(dt) = candidate {
                     let fire_at = chrono::Local
-                    .from_local_datetime(&dt)
-                    .single()
-                    .unwrap_or_else(|| chrono::Local::now());
+                        .from_local_datetime(&dt)
+                        .single()
+                        .unwrap_or_else(|| chrono::Local::now());
                     if fire_at > now && fire_at < now + window {
                         events.push(ScheduledEvent {
                             show_id: show.id.unwrap_or(0),

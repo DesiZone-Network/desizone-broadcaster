@@ -211,5 +211,3 @@ impl GatewayClient {
         status.connected = false;
     }
 }
-
-

@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,      // user_id
-    pub exp: usize,       // expiration timestamp
-    pub iat: usize,       // issued at
+    pub sub: String, // user_id
+    pub exp: usize,  // expiration timestamp
+    pub iat: usize,  // issued at
     pub display_name: Option<String>,
     pub permissions: Vec<String>,
 }
@@ -44,9 +44,7 @@ impl GatewayAuth {
     }
 
     pub fn display_name(&self) -> Option<String> {
-        self.claims
-            .as_ref()
-            .and_then(|c| c.display_name.clone())
+        self.claims.as_ref().and_then(|c| c.display_name.clone())
     }
 
     pub fn has_permission(&self, permission: &str) -> bool {
@@ -56,4 +54,3 @@ impl GatewayAuth {
             .unwrap_or(false)
     }
 }
-

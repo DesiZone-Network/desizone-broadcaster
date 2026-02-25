@@ -3,7 +3,6 @@
 /// Detects harsh sibilance (6–10 kHz) via a band-pass sidechain,
 /// then attenuates that frequency range when the level exceeds a threshold.
 /// Uses biquad band-pass + gain reduction.
-
 use biquad::{Biquad, Coefficients, DirectForm1, ToHertz, Q_BUTTERWORTH_F32};
 
 #[derive(Debug, Clone)]
@@ -51,18 +50,21 @@ impl Deesser {
 
     fn make_filters(sr: f32, freq: f32, _range: f32) -> (DirectForm1<f32>, DirectForm1<f32>) {
         let q = Q_BUTTERWORTH_F32;
-        let coeffs = Coefficients::<f32>::from_params(
-            biquad::Type::BandPass,
-            sr.hz(),
-            freq.hz(),
-            q,
-        ).unwrap_or_else(|_| Coefficients::<f32>::from_params(
-            biquad::Type::BandPass,
-            44100.0.hz(),
-            7500.0.hz(),
-            q,
-        ).unwrap());
-        (DirectForm1::<f32>::new(coeffs.clone()), DirectForm1::<f32>::new(coeffs))
+        let coeffs =
+            Coefficients::<f32>::from_params(biquad::Type::BandPass, sr.hz(), freq.hz(), q)
+                .unwrap_or_else(|_| {
+                    Coefficients::<f32>::from_params(
+                        biquad::Type::BandPass,
+                        44100.0.hz(),
+                        7500.0.hz(),
+                        q,
+                    )
+                    .unwrap()
+                });
+        (
+            DirectForm1::<f32>::new(coeffs.clone()),
+            DirectForm1::<f32>::new(coeffs),
+        )
     }
 
     /// Process a stereo frame [L, R].
@@ -72,7 +74,7 @@ impl Deesser {
         }
 
         let threshold_lin = db_to_linear(self.threshold_db);
-        let attack = 0.001f32;  // fast (per-sample smoothing coefficient)
+        let attack = 0.001f32; // fast (per-sample smoothing coefficient)
         let release = 0.9999f32; // slow release
 
         // Sidechain: detect band energy

@@ -151,6 +151,24 @@ export async function clearEventLog(olderThanDays: number): Promise<number> {
   return invoke('clear_event_log', { olderThanDays });
 }
 
+export async function writeEventLog(params: {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  category: 'audio' | 'stream' | 'scheduler' | 'gateway' | 'scripting' | 'database' | 'system';
+  event: string;
+  message: string;
+  deck?: string;
+  songId?: number;
+}): Promise<void> {
+  return invoke('write_event_log', {
+    level: params.level,
+    category: params.category,
+    event: params.event,
+    message: params.message,
+    deck: params.deck ?? null,
+    songId: params.songId ?? null,
+  });
+}
+
 // ── System Health ────────────────────────────────────────────────────────────
 
 export async function getHealthSnapshot(): Promise<SystemHealthSnapshot> {

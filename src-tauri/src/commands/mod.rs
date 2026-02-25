@@ -11,3 +11,4 @@ pub mod sam_db_commands;
 pub mod scheduler_commands;
 pub mod script_commands;
 pub mod stream_commands;
+pub mod waveform_commands;

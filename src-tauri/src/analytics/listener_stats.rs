@@ -49,11 +49,13 @@ pub async fn get_listener_graph(
 
     Ok(rows
         .into_iter()
-        .map(|(timestamp, listener_count, peak_listeners)| ListenerSnapshot {
-            timestamp,
-            listener_count,
-            peak_listeners,
-        })
+        .map(
+            |(timestamp, listener_count, peak_listeners)| ListenerSnapshot {
+                timestamp,
+                listener_count,
+                peak_listeners,
+            },
+        )
         .collect())
 }
 
@@ -131,4 +133,3 @@ pub async fn record_listener_snapshot(
 
     Ok(())
 }
-

@@ -1,2 +1,2 @@
-pub mod sam;
 pub mod local;
+pub mod sam;

@@ -105,7 +105,11 @@ fn stream_loop(
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
     // Icecast auth: source:<password> as Basic auth
-    let auth_user = if config.is_shoutcast { &config.password } else { "source" };
+    let auth_user = if config.is_shoutcast {
+        &config.password
+    } else {
+        "source"
+    };
     let auth_pass = &config.password;
 
     // We use a synchronous pipe: build the request with a streaming body.
@@ -219,7 +223,11 @@ impl std::io::Read for BodyReader {
 // Fix struct initialisation — BodyReader needs pos field
 impl BodyReader {
     fn new(rx: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
-        Self { rx, buffer: Vec::new(), pos: 0 }
+        Self {
+            rx,
+            buffer: Vec::new(),
+            pos: 0,
+        }
     }
 }
 

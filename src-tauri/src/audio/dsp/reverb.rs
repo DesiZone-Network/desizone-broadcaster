@@ -16,10 +16,30 @@ pub enum RoomPreset {
 impl RoomPreset {
     pub fn to_params(self) -> ReverbParams {
         match self {
-            RoomPreset::Small  => ReverbParams { room_size: 0.3, damping: 0.7, wet: 0.12, dry: 0.88 },
-            RoomPreset::Medium => ReverbParams { room_size: 0.55, damping: 0.55, wet: 0.22, dry: 0.78 },
-            RoomPreset::Large  => ReverbParams { room_size: 0.75, damping: 0.40, wet: 0.35, dry: 0.65 },
-            RoomPreset::Hall   => ReverbParams { room_size: 0.92, damping: 0.25, wet: 0.50, dry: 0.50 },
+            RoomPreset::Small => ReverbParams {
+                room_size: 0.3,
+                damping: 0.7,
+                wet: 0.12,
+                dry: 0.88,
+            },
+            RoomPreset::Medium => ReverbParams {
+                room_size: 0.55,
+                damping: 0.55,
+                wet: 0.22,
+                dry: 0.78,
+            },
+            RoomPreset::Large => ReverbParams {
+                room_size: 0.75,
+                damping: 0.40,
+                wet: 0.35,
+                dry: 0.65,
+            },
+            RoomPreset::Hall => ReverbParams {
+                room_size: 0.92,
+                damping: 0.25,
+                wet: 0.50,
+                dry: 0.50,
+            },
         }
     }
 }
@@ -65,7 +85,9 @@ impl CombFilter {
         out
     }
 
-    fn set_feedback(&mut self, v: f32) { self.feedback = v; }
+    fn set_feedback(&mut self, v: f32) {
+        self.feedback = v;
+    }
     fn set_damp(&mut self, damp: f32) {
         self.damp1 = damp;
         self.damp2 = 1.0 - damp;
@@ -81,7 +103,11 @@ struct AllpassFilter {
 
 impl AllpassFilter {
     fn new(size: usize) -> Self {
-        Self { buf: vec![0.0; size], pos: 0, feedback: 0.5 }
+        Self {
+            buf: vec![0.0; size],
+            pos: 0,
+            feedback: 0.5,
+        }
     }
 
     fn process(&mut self, input: f32) -> f32 {
@@ -155,8 +181,14 @@ impl Reverb {
     fn apply_params(&mut self) {
         let fb = self.params.room_size * 0.28 + 0.7; // 0.7–0.98
         let damp = self.params.damping;
-        for c in &mut self.combs_l { c.set_feedback(fb); c.set_damp(damp); }
-        for c in &mut self.combs_r { c.set_feedback(fb); c.set_damp(damp); }
+        for c in &mut self.combs_l {
+            c.set_feedback(fb);
+            c.set_damp(damp);
+        }
+        for c in &mut self.combs_r {
+            c.set_feedback(fb);
+            c.set_damp(damp);
+        }
     }
 
     /// Process a stereo frame [L, R] in place.
@@ -170,12 +202,20 @@ impl Reverb {
         // Parallel combs
         let mut out_l = 0.0f32;
         let mut out_r = 0.0f32;
-        for c in &mut self.combs_l { out_l += c.process(input); }
-        for c in &mut self.combs_r { out_r += c.process(input); }
+        for c in &mut self.combs_l {
+            out_l += c.process(input);
+        }
+        for c in &mut self.combs_r {
+            out_r += c.process(input);
+        }
 
         // Series allpasses
-        for ap in &mut self.allpasses_l { out_l = ap.process(out_l); }
-        for ap in &mut self.allpasses_r { out_r = ap.process(out_r); }
+        for ap in &mut self.allpasses_l {
+            out_l = ap.process(out_l);
+        }
+        for ap in &mut self.allpasses_r {
+            out_r = ap.process(out_r);
+        }
 
         frame[0] = frame[0] * self.params.dry + out_l * self.params.wet;
         frame[1] = frame[1] * self.params.dry + out_r * self.params.wet;

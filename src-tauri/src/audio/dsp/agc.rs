@@ -188,9 +188,9 @@ impl GatedAGC {
 
         // Attack/release smoothing (one-pole IIR)
         let coeff = if desired_gain < self.current_gain {
-            self.attack_coeff   // gain needs to decrease quickly
+            self.attack_coeff // gain needs to decrease quickly
         } else {
-            self.release_coeff  // gain recovers slowly
+            self.release_coeff // gain recovers slowly
         };
 
         self.current_gain = coeff * self.current_gain + (1.0 - coeff) * desired_gain;
@@ -248,7 +248,10 @@ mod tests {
 
     #[test]
     fn disabled_agc_is_passthrough() {
-        let config = AgcConfig { enabled: false, ..Default::default() };
+        let config = AgcConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let mut agc = GatedAGC::new(44100.0, config);
         let (mut l, mut r) = (0.5_f32, -0.3_f32);
         agc.process_stereo(&mut l, &mut r);
@@ -264,7 +267,11 @@ mod tests {
 
     #[test]
     fn gate_holds_gain_on_silence() {
-        let config = AgcConfig { enabled: true, gate_db: -20.0, ..Default::default() };
+        let config = AgcConfig {
+            enabled: true,
+            gate_db: -20.0,
+            ..Default::default()
+        };
         let mut agc = GatedAGC::new(44100.0, config);
         let initial_gain = agc.current_gain;
         // Feed silence (below gate)

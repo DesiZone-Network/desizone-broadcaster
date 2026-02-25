@@ -52,7 +52,7 @@ pub struct EncoderConfig {
     pub codec: Codec,
     pub bitrate_kbps: Option<u32>,
     pub sample_rate: u32,
-    pub channels: u8, // 1 = mono, 2 = stereo
+    pub channels: u8,        // 1 = mono, 2 = stereo
     pub quality: Option<u8>, // VBR 0-9
 
     // Output
@@ -244,16 +244,13 @@ impl EncoderManager {
         let config_clone = config.clone();
 
         let handle = tokio::spawn(async move {
-            run_encoder_task(
-                config_clone,
-                consumer,
-                stop_rx,
-                manager_clone,
-            )
-            .await;
+            run_encoder_task(config_clone, consumer, stop_rx, manager_clone).await;
         });
 
-        self.tasks.lock().unwrap().insert(id, RunningEncoder { handle, stop_tx });
+        self.tasks
+            .lock()
+            .unwrap()
+            .insert(id, RunningEncoder { handle, stop_tx });
         self.set_status(id, EncoderStatus::Connecting, None);
     }
 
@@ -350,7 +347,13 @@ async fn run_encoder_task(
                 super::shoutcast::stream_loop_async(&config, &mut consumer, &mut stop_rx).await
             }
             OutputType::File => {
-                super::encoder_file::record_loop_async(&config, &mut consumer, &mut stop_rx, &manager).await
+                super::encoder_file::record_loop_async(
+                    &config,
+                    &mut consumer,
+                    &mut stop_rx,
+                    &manager,
+                )
+                .await
             }
         };
 
@@ -370,7 +373,10 @@ async fn run_encoder_task(
 
                 manager.set_status(
                     id,
-                    EncoderStatus::Retrying { attempt, max: max_attempts },
+                    EncoderStatus::Retrying {
+                        attempt,
+                        max: max_attempts,
+                    },
                     Some(e),
                 );
 

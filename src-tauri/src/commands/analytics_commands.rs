@@ -185,3 +185,48 @@ pub fn export_report_csv(report_data: ReportData) -> Result<String, String> {
     reports::export_report_csv(&report_data)
 }
 
+#[tauri::command]
+pub async fn write_event_log(
+    level: String,
+    category: String,
+    event: String,
+    message: String,
+    deck: Option<String>,
+    song_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let pool = state
+        .local_db
+        .as_ref()
+        .ok_or("Local database not available")?;
+
+    let log_level = match level.as_str() {
+        "error" => event_logger::LogLevel::Error,
+        "warn" => event_logger::LogLevel::Warn,
+        "info" => event_logger::LogLevel::Info,
+        _ => event_logger::LogLevel::Debug,
+    };
+    let log_category = match category.as_str() {
+        "audio" => event_logger::EventCategory::Audio,
+        "stream" => event_logger::EventCategory::Stream,
+        "scheduler" => event_logger::EventCategory::Scheduler,
+        "gateway" => event_logger::EventCategory::Gateway,
+        "scripting" => event_logger::EventCategory::Scripting,
+        "database" => event_logger::EventCategory::Database,
+        _ => event_logger::EventCategory::System,
+    };
+
+    event_logger::log_event(
+        pool,
+        log_level,
+        log_category,
+        &event,
+        &message,
+        None,
+        deck.as_deref(),
+        song_id,
+        None,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}

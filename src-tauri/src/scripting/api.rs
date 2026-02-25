@@ -2,7 +2,6 @@
 ///
 /// Provides the full Phase 5 API surface to each script VM:
 ///   deck, queue, media, encoder, schedule, station, log, http, store
-
 use mlua::{Lua, Result as LuaResult, Value};
 use std::sync::{Arc, Mutex};
 
@@ -116,22 +115,34 @@ fn register_deck(lua: &Lua) -> LuaResult<()> {
 
     // Stub implementations — in a full integration these would call into AppState.
     // Scripts can still call these; no-ops will be logged.
-    tbl.set("play", lua.create_function(|_, deck_id: String| {
-        log::info!("[script] deck.play({})", deck_id);
-        Ok(())
-    })?)?;
-    tbl.set("stop", lua.create_function(|_, deck_id: String| {
-        log::info!("[script] deck.stop({})", deck_id);
-        Ok(())
-    })?)?;
-    tbl.set("load", lua.create_function(|_, (deck_id, song_id): (String, i64)| {
-        log::info!("[script] deck.load({}, {})", deck_id, song_id);
-        Ok(())
-    })?)?;
-    tbl.set("get_position", lua.create_function(|_, deck_id: String| {
-        log::info!("[script] deck.get_position({})", deck_id);
-        Ok(0u64)
-    })?)?;
+    tbl.set(
+        "play",
+        lua.create_function(|_, deck_id: String| {
+            log::info!("[script] deck.play({})", deck_id);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "stop",
+        lua.create_function(|_, deck_id: String| {
+            log::info!("[script] deck.stop({})", deck_id);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "load",
+        lua.create_function(|_, (deck_id, song_id): (String, i64)| {
+            log::info!("[script] deck.load({}, {})", deck_id, song_id);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "get_position",
+        lua.create_function(|_, deck_id: String| {
+            log::info!("[script] deck.get_position({})", deck_id);
+            Ok(0u64)
+        })?,
+    )?;
 
     lua.globals().set("deck", tbl)?;
     Ok(())
@@ -142,29 +153,47 @@ fn register_deck(lua: &Lua) -> LuaResult<()> {
 fn register_queue(lua: &Lua) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
-    tbl.set("get", lua.create_function(|lua_ctx, ()| {
-        lua_ctx.create_table() // empty table — full integration would call queue commands
-    })?)?;
-    tbl.set("add", lua.create_function(|_, song_id: i64| {
-        log::info!("[script] queue.add({})", song_id);
-        Ok(())
-    })?)?;
-    tbl.set("add_at", lua.create_function(|_, (song_id, pos): (i64, u32)| {
-        log::info!("[script] queue.add_at({}, {})", song_id, pos);
-        Ok(())
-    })?)?;
-    tbl.set("remove", lua.create_function(|_, pos: u32| {
-        log::info!("[script] queue.remove({})", pos);
-        Ok(())
-    })?)?;
-    tbl.set("clear", lua.create_function(|_, ()| {
-        log::info!("[script] queue.clear()");
-        Ok(())
-    })?)?;
-    tbl.set("add_playlist", lua.create_function(|_, playlist_id: i64| {
-        log::info!("[script] queue.add_playlist({})", playlist_id);
-        Ok(())
-    })?)?;
+    tbl.set(
+        "get",
+        lua.create_function(|lua_ctx, ()| {
+            lua_ctx.create_table() // empty table — full integration would call queue commands
+        })?,
+    )?;
+    tbl.set(
+        "add",
+        lua.create_function(|_, song_id: i64| {
+            log::info!("[script] queue.add({})", song_id);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "add_at",
+        lua.create_function(|_, (song_id, pos): (i64, u32)| {
+            log::info!("[script] queue.add_at({}, {})", song_id, pos);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "remove",
+        lua.create_function(|_, pos: u32| {
+            log::info!("[script] queue.remove({})", pos);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "clear",
+        lua.create_function(|_, ()| {
+            log::info!("[script] queue.clear()");
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "add_playlist",
+        lua.create_function(|_, playlist_id: i64| {
+            log::info!("[script] queue.add_playlist({})", playlist_id);
+            Ok(())
+        })?,
+    )?;
 
     lua.globals().set("queue", tbl)?;
     Ok(())
@@ -175,15 +204,24 @@ fn register_queue(lua: &Lua) -> LuaResult<()> {
 fn register_media(lua: &Lua) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
-    tbl.set("search", lua.create_function(|lua_ctx, _query: String| {
-        lua_ctx.create_table() // stub
-    })?)?;
-    tbl.set("get", lua.create_function(|lua_ctx, _id: i64| {
-        lua_ctx.create_table() // stub
-    })?)?;
-    tbl.set("get_random", lua.create_function(|lua_ctx, _category: Value| {
-        lua_ctx.create_table() // stub
-    })?)?;
+    tbl.set(
+        "search",
+        lua.create_function(|lua_ctx, _query: String| {
+            lua_ctx.create_table() // stub
+        })?,
+    )?;
+    tbl.set(
+        "get",
+        lua.create_function(|lua_ctx, _id: i64| {
+            lua_ctx.create_table() // stub
+        })?,
+    )?;
+    tbl.set(
+        "get_random",
+        lua.create_function(|lua_ctx, _category: Value| {
+            lua_ctx.create_table() // stub
+        })?,
+    )?;
 
     lua.globals().set("media", tbl)?;
     Ok(())
@@ -194,22 +232,34 @@ fn register_media(lua: &Lua) -> LuaResult<()> {
 fn register_encoder(lua: &Lua) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
-    tbl.set("start", lua.create_function(|_, id: i64| {
-        log::info!("[script] encoder.start({})", id);
-        Ok(())
-    })?)?;
-    tbl.set("stop", lua.create_function(|_, id: i64| {
-        log::info!("[script] encoder.stop({})", id);
-        Ok(())
-    })?)?;
-    tbl.set("set_stream_title", lua.create_function(|_, (id, title): (i64, String)| {
-        log::info!("[script] encoder.set_stream_title({}, '{}')", id, title);
-        Ok(())
-    })?)?;
-    tbl.set("get_listeners", lua.create_function(|_, id: i64| {
-        log::info!("[script] encoder.get_listeners({})", id);
-        Ok(0u32)
-    })?)?;
+    tbl.set(
+        "start",
+        lua.create_function(|_, id: i64| {
+            log::info!("[script] encoder.start({})", id);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "stop",
+        lua.create_function(|_, id: i64| {
+            log::info!("[script] encoder.stop({})", id);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "set_stream_title",
+        lua.create_function(|_, (id, title): (i64, String)| {
+            log::info!("[script] encoder.set_stream_title({}, '{}')", id, title);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "get_listeners",
+        lua.create_function(|_, id: i64| {
+            log::info!("[script] encoder.get_listeners({})", id);
+            Ok(0u32)
+        })?,
+    )?;
 
     lua.globals().set("encoder", tbl)?;
     Ok(())
@@ -220,18 +270,27 @@ fn register_encoder(lua: &Lua) -> LuaResult<()> {
 fn register_schedule(lua: &Lua) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
-    tbl.set("add_once", lua.create_function(|_, (_dt, _fn): (String, Value)| {
-        log::info!("[script] schedule.add_once()");
-        Ok(0i64) // returns schedule id
-    })?)?;
-    tbl.set("add_cron", lua.create_function(|_, (_expr, _fn): (String, Value)| {
-        log::info!("[script] schedule.add_cron()");
-        Ok(0i64)
-    })?)?;
-    tbl.set("remove", lua.create_function(|_, id: i64| {
-        log::info!("[script] schedule.remove({})", id);
-        Ok(())
-    })?)?;
+    tbl.set(
+        "add_once",
+        lua.create_function(|_, (_dt, _fn): (String, Value)| {
+            log::info!("[script] schedule.add_once()");
+            Ok(0i64) // returns schedule id
+        })?,
+    )?;
+    tbl.set(
+        "add_cron",
+        lua.create_function(|_, (_expr, _fn): (String, Value)| {
+            log::info!("[script] schedule.add_cron()");
+            Ok(0i64)
+        })?,
+    )?;
+    tbl.set(
+        "remove",
+        lua.create_function(|_, id: i64| {
+            log::info!("[script] schedule.remove({})", id);
+            Ok(())
+        })?,
+    )?;
 
     lua.globals().set("schedule", tbl)?;
     Ok(())
@@ -242,14 +301,20 @@ fn register_schedule(lua: &Lua) -> LuaResult<()> {
 fn register_station(lua: &Lua) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
-    tbl.set("set_mode", lua.create_function(|_, mode: String| {
-        log::info!("[script] station.set_mode('{}')", mode);
-        Ok(())
-    })?)?;
-    tbl.set("emergency_stop", lua.create_function(|_, ()| {
-        log::warn!("[script] station.emergency_stop() invoked");
-        Ok(())
-    })?)?;
+    tbl.set(
+        "set_mode",
+        lua.create_function(|_, mode: String| {
+            log::info!("[script] station.set_mode('{}')", mode);
+            Ok(())
+        })?,
+    )?;
+    tbl.set(
+        "emergency_stop",
+        lua.create_function(|_, ()| {
+            log::warn!("[script] station.emergency_stop() invoked");
+            Ok(())
+        })?,
+    )?;
 
     lua.globals().set("station", tbl)?;
     Ok(())
@@ -261,8 +326,9 @@ fn register_http(lua: &Lua) -> LuaResult<()> {
     let tbl = lua.create_table()?;
 
     // http.get(url) — synchronous (blocking) HTTP GET for script use
-    tbl.set("get", lua.create_function(|lua_ctx, url: String| {
-        match reqwest::blocking::get(&url) {
+    tbl.set(
+        "get",
+        lua.create_function(|lua_ctx, url: String| match reqwest::blocking::get(&url) {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 let body = resp.text().unwrap_or_default();
@@ -277,29 +343,37 @@ fn register_http(lua: &Lua) -> LuaResult<()> {
                 t.set("body", e.to_string())?;
                 Ok(t)
             }
-        }
-    })?)?;
+        })?,
+    )?;
 
     // http.post(url, body_json)
-    tbl.set("post", lua.create_function(|lua_ctx, (url, body): (String, String)| {
-        let client = reqwest::blocking::Client::new();
-        match client.post(&url).header("Content-Type", "application/json").body(body).send() {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let body = resp.text().unwrap_or_default();
-                let t = lua_ctx.create_table()?;
-                t.set("status", status)?;
-                t.set("body", body)?;
-                Ok(t)
+    tbl.set(
+        "post",
+        lua.create_function(|lua_ctx, (url, body): (String, String)| {
+            let client = reqwest::blocking::Client::new();
+            match client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+            {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().unwrap_or_default();
+                    let t = lua_ctx.create_table()?;
+                    t.set("status", status)?;
+                    t.set("body", body)?;
+                    Ok(t)
+                }
+                Err(e) => {
+                    let t = lua_ctx.create_table()?;
+                    t.set("status", 0u16)?;
+                    t.set("body", e.to_string())?;
+                    Ok(t)
+                }
             }
-            Err(e) => {
-                let t = lua_ctx.create_table()?;
-                t.set("status", 0u16)?;
-                t.set("body", e.to_string())?;
-                Ok(t)
-            }
-        }
-    })?)?;
+        })?,
+    )?;
 
     lua.globals().set("http", tbl)?;
     Ok(())
@@ -316,12 +390,22 @@ fn lua_value_to_json(val: Value) -> serde_json::Value {
         Value::String(s) => serde_json::Value::String(s.to_string_lossy()),
         Value::Table(t) => {
             // Array heuristic: check if keys are sequential integers
-            let pairs: Vec<_> = t.clone().pairs::<Value, Value>().filter_map(|p| p.ok()).collect();
-            let is_array = pairs.iter().enumerate().all(|(i, (k, _))| {
-                matches!(k, Value::Integer(n) if *n == (i as i64 + 1))
-            });
+            let pairs: Vec<_> = t
+                .clone()
+                .pairs::<Value, Value>()
+                .filter_map(|p| p.ok())
+                .collect();
+            let is_array = pairs
+                .iter()
+                .enumerate()
+                .all(|(i, (k, _))| matches!(k, Value::Integer(n) if *n == (i as i64 + 1)));
             if is_array {
-                serde_json::Value::Array(pairs.into_iter().map(|(_, v)| lua_value_to_json(v)).collect())
+                serde_json::Value::Array(
+                    pairs
+                        .into_iter()
+                        .map(|(_, v)| lua_value_to_json(v))
+                        .collect(),
+                )
             } else {
                 let mut map = serde_json::Map::new();
                 for (k, v) in pairs {

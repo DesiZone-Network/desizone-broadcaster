@@ -1,3 +1,4 @@
+use chrono::Timelike;
 /// Request Policy Engine
 ///
 /// Evaluates song requests against a configurable policy to auto-accept or
@@ -5,7 +6,6 @@
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
-use chrono::Timelike;
 
 // ── Policy ────────────────────────────────────────────────────────────────────
 
@@ -142,7 +142,10 @@ pub async fn evaluate_request(
         if hour < start_h || hour >= end_h {
             return Err(PolicyViolation {
                 rule: "active_hours".to_string(),
-                message: format!("Requests only accepted between {:02}:00 and {:02}:00", start_h, end_h),
+                message: format!(
+                    "Requests only accepted between {:02}:00 and {:02}:00",
+                    start_h, end_h
+                ),
             });
         }
     }
@@ -183,7 +186,10 @@ pub async fn evaluate_request(
     if song_day_count >= policy.max_requests_per_song_per_day as i64 {
         return Err(PolicyViolation {
             rule: "song_day_limit".to_string(),
-            message: format!("This song has already been requested {} times today.", song_day_count),
+            message: format!(
+                "This song has already been requested {} times today.",
+                song_day_count
+            ),
         });
     }
 
@@ -202,7 +208,10 @@ pub async fn evaluate_request(
             let wait = (t + policy.min_minutes_between_same_song as i64 * 60 - now) / 60;
             return Err(PolicyViolation {
                 rule: "song_min_gap".to_string(),
-                message: format!("Please wait {} more minutes before requesting this song again.", wait),
+                message: format!(
+                    "Please wait {} more minutes before requesting this song again.",
+                    wait
+                ),
             });
         }
     }
@@ -220,7 +229,10 @@ pub async fn evaluate_request(
     if artist_hour_count >= policy.max_requests_per_artist_per_hour as i64 {
         return Err(PolicyViolation {
             rule: "artist_hour_limit".to_string(),
-            message: format!("Too many requests for this artist this hour (max {}).", policy.max_requests_per_artist_per_hour),
+            message: format!(
+                "Too many requests for this artist this hour (max {}).",
+                policy.max_requests_per_artist_per_hour
+            ),
         });
     }
 
@@ -239,7 +251,10 @@ pub async fn evaluate_request(
             let wait = (t + policy.min_minutes_between_same_artist as i64 * 60 - now) / 60;
             return Err(PolicyViolation {
                 rule: "artist_min_gap".to_string(),
-                message: format!("Please wait {} more minutes before requesting this artist again.", wait),
+                message: format!(
+                    "Please wait {} more minutes before requesting this artist again.",
+                    wait
+                ),
             });
         }
     }
@@ -257,7 +272,10 @@ pub async fn evaluate_request(
     if req_hour_count >= policy.max_requests_per_requester_per_hour as i64 {
         return Err(PolicyViolation {
             rule: "requester_hour_limit".to_string(),
-            message: format!("You can only request {} songs per hour.", policy.max_requests_per_requester_per_hour),
+            message: format!(
+                "You can only request {} songs per hour.",
+                policy.max_requests_per_requester_per_hour
+            ),
         });
     }
 
@@ -274,7 +292,10 @@ pub async fn evaluate_request(
     if req_day_count >= policy.max_requests_per_requester_per_day as i64 {
         return Err(PolicyViolation {
             rule: "requester_day_limit".to_string(),
-            message: format!("You can only request {} songs per day.", policy.max_requests_per_requester_per_day),
+            message: format!(
+                "You can only request {} songs per day.",
+                policy.max_requests_per_requester_per_day
+            ),
         });
     }
 
@@ -338,7 +359,10 @@ pub async fn get_requests(
         .collect())
 }
 
-pub async fn insert_request(pool: &SqlitePool, entry: &RequestLogEntry) -> Result<i64, sqlx::Error> {
+pub async fn insert_request(
+    pool: &SqlitePool,
+    entry: &RequestLogEntry,
+) -> Result<i64, sqlx::Error> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -368,14 +392,12 @@ pub async fn update_request_status(
     status: RequestStatus,
     reason: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE request_log SET status = ?, rejection_reason = ? WHERE id = ?"
-    )
-    .bind(status.as_str())
-    .bind(reason)
-    .bind(id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE request_log SET status = ?, rejection_reason = ? WHERE id = ?")
+        .bind(status.as_str())
+        .bind(reason)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

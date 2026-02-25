@@ -49,7 +49,13 @@ impl Default for EqConfig {
 impl ChannelEQ {
     pub fn new(sample_rate: f32, config: EqConfig) -> Self {
         let (low_shelf, peak_mid, high_shelf) = Self::build_filters(sample_rate, &config);
-        Self { sample_rate, low_shelf, peak_mid, high_shelf, config }
+        Self {
+            sample_rate,
+            low_shelf,
+            peak_mid,
+            high_shelf,
+            config,
+        }
     }
 
     pub fn with_defaults(sample_rate: f32) -> Self {
@@ -136,7 +142,13 @@ impl ChannelEQ {
     /// Coefficients that pass audio unmodified (gain = 0 dB, all zeros)
     fn unity_coeffs() -> Coefficients<f32> {
         // b0=1, b1=0, b2=0, a1=0, a2=0
-        Coefficients { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 }
+        Coefficients {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        }
     }
 }
 
@@ -150,12 +162,18 @@ mod tests {
         // With all gains at 0 dB the signal should be unchanged (within float precision)
         let input = 0.5_f32;
         let output = eq.process_mono(input);
-        assert!((output - input).abs() < 1e-4, "unity EQ should not alter signal: {output}");
+        assert!(
+            (output - input).abs() < 1e-4,
+            "unity EQ should not alter signal: {output}"
+        );
     }
 
     #[test]
     fn boost_increases_level() {
-        let config = EqConfig { low_gain_db: 6.0, ..Default::default() };
+        let config = EqConfig {
+            low_gain_db: 6.0,
+            ..Default::default()
+        };
         let mut eq = ChannelEQ::new(44100.0, config);
         // Feed a DC offset — low shelf at DC should boost it
         let output = eq.process_mono(0.5);

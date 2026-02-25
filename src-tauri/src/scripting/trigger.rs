@@ -3,7 +3,6 @@
 /// The audio engine and other subsystems fire `ScriptEvent`s.
 /// The `ScriptEngine` listens on an async channel and dispatches them
 /// to all enabled scripts whose `trigger_type` matches.
-
 use serde::{Deserialize, Serialize};
 
 /// Events that can trigger script execution.

@@ -3,7 +3,6 @@
 /// `ScriptEngine` manages the script registry and fires events.
 /// Each script runs in its own isolated Lua VM.
 /// Output from log.* is captured and stored per-script for the UI.
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -82,7 +81,10 @@ impl ScriptEngine {
         let stores = self.stores.lock().unwrap();
         if !stores.contains_key(&id) {
             drop(stores);
-            self.stores.lock().unwrap().insert(id, Arc::new(Mutex::new(HashMap::new())));
+            self.stores
+                .lock()
+                .unwrap()
+                .insert(id, Arc::new(Mutex::new(HashMap::new())));
         }
         id
     }
@@ -143,12 +145,14 @@ impl ScriptEngine {
     pub async fn run_script(&self, id: i64) -> ScriptRunResult {
         let script = match self.get_script(id) {
             Some(s) => s,
-            None => return ScriptRunResult {
-                success: false,
-                output: vec![],
-                error: Some("Script not found".to_string()),
-                error_line: None,
-            },
+            None => {
+                return ScriptRunResult {
+                    success: false,
+                    output: vec![],
+                    error: Some("Script not found".to_string()),
+                    error_line: None,
+                }
+            }
         };
         let event = ScriptEvent::Manual;
         self.run_script_with_event(&script, &event).await
@@ -166,15 +170,18 @@ impl ScriptEngine {
         // Get or create store
         let store = {
             let stores = self.stores.lock().unwrap();
-            stores.get(&id).cloned().unwrap_or_else(|| {
-                Arc::new(Mutex::new(HashMap::new()))
-            })
+            stores
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())))
         };
 
         // Run in blocking task (Lua is sync)
         let result = tokio::task::spawn_blocking(move || {
             Self::execute_script(id, &content, &event, log_sink_clone, store)
-        }).await.unwrap_or_else(|e| ScriptRunResult {
+        })
+        .await
+        .unwrap_or_else(|e| ScriptRunResult {
             success: false,
             output: vec![],
             error: Some(format!("Script task panicked: {e}")),
@@ -218,12 +225,14 @@ impl ScriptEngine {
         // Create a fresh sandboxed VM for each run
         let lua = match create_sandboxed_vm(TrustLevel::Basic) {
             Ok(l) => l,
-            Err(e) => return ScriptRunResult {
-                success: false,
-                output: vec![],
-                error: Some(format!("Failed to create Lua VM: {e}")),
-                error_line: None,
-            },
+            Err(e) => {
+                return ScriptRunResult {
+                    success: false,
+                    output: vec![],
+                    error: Some(format!("Failed to create Lua VM: {e}")),
+                    error_line: None,
+                }
+            }
         };
 
         // Register DesiZone API
@@ -242,7 +251,10 @@ impl ScriptEngine {
         // Execute the script
         match lua.load(content).exec() {
             Ok(_) => {
-                let output: Vec<String> = log_sink.lock().unwrap().iter()
+                let output: Vec<String> = log_sink
+                    .lock()
+                    .unwrap()
+                    .iter()
                     .map(|e| format!("[{}] {}", e.level, e.message))
                     .collect();
                 ScriptRunResult {
@@ -255,7 +267,10 @@ impl ScriptEngine {
             Err(e) => {
                 let error_str = e.to_string();
                 let error_line = parse_error_line(&error_str);
-                let output: Vec<String> = log_sink.lock().unwrap().iter()
+                let output: Vec<String> = log_sink
+                    .lock()
+                    .unwrap()
+                    .iter()
                     .map(|e| format!("[{}] {}", e.level, e.message))
                     .collect();
                 ScriptRunResult {
@@ -275,7 +290,14 @@ impl ScriptEngine {
 fn inject_event_table(lua: &Lua, event: &ScriptEvent) -> Result<(), mlua::Error> {
     let tbl = lua.create_table()?;
     match event {
-        ScriptEvent::TrackStart { id, title, artist, album, duration_ms, category } => {
+        ScriptEvent::TrackStart {
+            id,
+            title,
+            artist,
+            album,
+            duration_ms,
+            category,
+        } => {
             tbl.set("id", *id)?;
             tbl.set("title", title.as_str())?;
             tbl.set("artist", artist.as_str())?;
@@ -291,7 +313,11 @@ fn inject_event_table(lua: &Lua, event: &ScriptEvent) -> Result<(), mlua::Error>
         ScriptEvent::Hour { hour } => {
             tbl.set("hour", *hour)?;
         }
-        ScriptEvent::RequestReceived { song_id, song_title, requester } => {
+        ScriptEvent::RequestReceived {
+            song_id,
+            song_title,
+            requester,
+        } => {
             tbl.set("song_id", *song_id)?;
             tbl.set("song_title", song_title.as_str())?;
             tbl.set("requester", requester.as_str())?;
@@ -303,7 +329,12 @@ fn inject_event_table(lua: &Lua, event: &ScriptEvent) -> Result<(), mlua::Error>
             tbl.set("encoder_id", *encoder_id)?;
             tbl.set("reason", reason.as_str())?;
         }
-        ScriptEvent::CrossfadeStart { outgoing_id, outgoing_title, incoming_id, incoming_title } => {
+        ScriptEvent::CrossfadeStart {
+            outgoing_id,
+            outgoing_title,
+            incoming_id,
+            incoming_title,
+        } => {
             tbl.set("outgoing_id", *outgoing_id)?;
             tbl.set("outgoing_title", outgoing_title.as_str())?;
             tbl.set("incoming_id", *incoming_id)?;

@@ -219,15 +219,17 @@ pub async fn get_snapshots(
 
     Ok(rows
         .into_iter()
-        .map(|(id, enc_id, snap_at, cur, peak, uniq, bitrate)| ListenerSnapshot {
-            id: Some(id),
-            encoder_id: enc_id,
-            snapshot_at: snap_at,
-            current_listeners: cur as u32,
-            peak_listeners: peak as u32,
-            unique_listeners: uniq as u32,
-            stream_bitrate: bitrate.map(|b| b as u32),
-        })
+        .map(
+            |(id, enc_id, snap_at, cur, peak, uniq, bitrate)| ListenerSnapshot {
+                id: Some(id),
+                encoder_id: enc_id,
+                snapshot_at: snap_at,
+                current_listeners: cur as u32,
+                peak_listeners: peak as u32,
+                unique_listeners: uniq as u32,
+                stream_bitrate: bitrate.map(|b| b as u32),
+            },
+        )
         .collect())
 }
 

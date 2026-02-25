@@ -30,11 +30,7 @@ pub async fn connect_gateway(
                     session_id,
                     command,
                 } => {
-                    log::info!(
-                        "Remote command from session {}: {:?}",
-                        session_id,
-                        command
-                    );
+                    log::info!("Remote command from session {}: {:?}", session_id, command);
                     // Commands will be handled via Tauri events
                 }
                 GatewayMessage::RemoteDjJoined {
@@ -130,10 +126,7 @@ pub fn get_remote_sessions(state: State<'_, AppState>) -> Result<Vec<RemoteSessi
 
 /// Kick a remote DJ session
 #[tauri::command]
-pub async fn kick_remote_dj(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn kick_remote_dj(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut sessions = state.remote_sessions.lock().unwrap();
     sessions.remove(&session_id);
 
@@ -209,13 +202,10 @@ pub fn set_mix_minus(enabled: bool, state: State<'_, AppState>) -> Result<(), St
     let mut mix_minus = state.mix_minus_enabled.lock().unwrap();
     *mix_minus = enabled;
 
-    log::info!("Mix-minus: {}", if enabled { "enabled" } else { "disabled" });
+    log::info!(
+        "Mix-minus: {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
 
     Ok(())
 }
-
-
-
-
-
-

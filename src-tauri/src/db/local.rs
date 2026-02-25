@@ -49,7 +49,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             agc_release_ms      REAL    DEFAULT 500.0,
             agc_pre_emphasis    TEXT    DEFAULT '75us',
             comp_enabled        INTEGER DEFAULT 0,
-            comp_settings_json  TEXT
+            comp_settings_json  TEXT,
+            pipeline_settings_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS crossfade_config (
@@ -120,6 +121,41 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         CREATE TABLE IF NOT EXISTS gap_killer_config (
             id               INTEGER PRIMARY KEY DEFAULT 1,
             gap_killer_json  TEXT    NOT NULL DEFAULT '{"mode":"smart","threshold_db":-50.0,"min_silence_ms":500}'
+        );
+
+        -- Runtime DJ mode (manual/assisted/autodj)
+        CREATE TABLE IF NOT EXISTS dj_runtime_config (
+            id           INTEGER PRIMARY KEY DEFAULT 1,
+            dj_mode      TEXT    NOT NULL DEFAULT 'manual',
+            updated_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+
+        -- AutoDJ transition mode/config
+        CREATE TABLE IF NOT EXISTS autodj_transition_config (
+            id           INTEGER PRIMARY KEY DEFAULT 1,
+            config_json  TEXT    NOT NULL
+        );
+
+        -- SAM-style clockwheel config + runtime cursor
+        CREATE TABLE IF NOT EXISTS autodj_clockwheel_config (
+            id           INTEGER PRIMARY KEY DEFAULT 1,
+            config_json  TEXT    NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS autodj_clockwheel_state (
+            id           INTEGER PRIMARY KEY DEFAULT 1,
+            next_index   INTEGER NOT NULL DEFAULT 0,
+            updated_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+
+        -- Cached waveform peaks for deck visualisation
+        CREATE TABLE IF NOT EXISTS waveform_cache (
+            file_path    TEXT    NOT NULL,
+            mtime_ms     INTEGER NOT NULL,
+            resolution   INTEGER NOT NULL,
+            peaks_json   TEXT    NOT NULL,
+            updated_at   INTEGER NOT NULL,
+            PRIMARY KEY (file_path, mtime_ms, resolution)
         );
 
         -- Phase 6: Gateway connection settings
@@ -225,6 +261,12 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+
+    // Backward-compat migration for older DBs created before `pipeline_settings_json`.
+    let _ = sqlx::query("ALTER TABLE channel_dsp_settings ADD COLUMN pipeline_settings_json TEXT")
+        .execute(pool)
+        .await;
+
     Ok(())
 }
 
@@ -274,7 +316,11 @@ pub async fn upsert_cue_point(pool: &SqlitePool, cue: &CuePoint) -> Result<(), s
     Ok(())
 }
 
-pub async fn delete_cue_point(pool: &SqlitePool, song_id: i64, name: &str) -> Result<(), sqlx::Error> {
+pub async fn delete_cue_point(
+    pool: &SqlitePool,
+    song_id: i64,
+    name: &str,
+) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM cue_points WHERE song_id = ? AND name = ?")
         .bind(song_id)
         .bind(name)
@@ -302,12 +348,10 @@ pub async fn get_song_fade_override(
     pool: &SqlitePool,
     song_id: i64,
 ) -> Result<Option<SongFadeOverrideRow>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT * FROM song_fade_overrides WHERE song_id = ?",
-    )
-    .bind(song_id)
-    .fetch_optional(pool)
-    .await?;
+    let row = sqlx::query("SELECT * FROM song_fade_overrides WHERE song_id = ?")
+        .bind(song_id)
+        .fetch_optional(pool)
+        .await?;
 
     Ok(row.map(|r| SongFadeOverrideRow {
         song_id: r.get("song_id"),
@@ -377,6 +421,7 @@ pub struct ChannelDspRow {
     pub agc_pre_emphasis: String,
     pub comp_enabled: bool,
     pub comp_settings_json: Option<String>,
+    pub pipeline_settings_json: Option<String>,
 }
 
 pub async fn get_channel_dsp(
@@ -405,6 +450,7 @@ pub async fn get_channel_dsp(
         agc_pre_emphasis: r.get("agc_pre_emphasis"),
         comp_enabled: r.get::<i64, _>("comp_enabled") != 0,
         comp_settings_json: r.get("comp_settings_json"),
+        pipeline_settings_json: r.try_get("pipeline_settings_json").ok(),
     }))
 }
 
@@ -414,8 +460,8 @@ pub async fn upsert_channel_dsp(pool: &SqlitePool, row: &ChannelDspRow) -> Resul
         INSERT INTO channel_dsp_settings
             (channel, eq_low_gain_db, eq_low_freq_hz, eq_mid_gain_db, eq_mid_freq_hz, eq_mid_q,
              eq_high_gain_db, eq_high_freq_hz, agc_enabled, agc_gate_db, agc_max_gain_db,
-             agc_attack_ms, agc_release_ms, agc_pre_emphasis, comp_enabled, comp_settings_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             agc_attack_ms, agc_release_ms, agc_pre_emphasis, comp_enabled, comp_settings_json, pipeline_settings_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(channel) DO UPDATE SET
             eq_low_gain_db   = excluded.eq_low_gain_db,
             eq_low_freq_hz   = excluded.eq_low_freq_hz,
@@ -431,7 +477,8 @@ pub async fn upsert_channel_dsp(pool: &SqlitePool, row: &ChannelDspRow) -> Resul
             agc_release_ms   = excluded.agc_release_ms,
             agc_pre_emphasis = excluded.agc_pre_emphasis,
             comp_enabled     = excluded.comp_enabled,
-            comp_settings_json = excluded.comp_settings_json
+            comp_settings_json = excluded.comp_settings_json,
+            pipeline_settings_json = excluded.pipeline_settings_json
         "#,
     )
     .bind(&row.channel)
@@ -450,6 +497,110 @@ pub async fn upsert_channel_dsp(pool: &SqlitePool, row: &ChannelDspRow) -> Resul
     .bind(&row.agc_pre_emphasis)
     .bind(row.comp_enabled as i64)
     .bind(&row.comp_settings_json)
+    .bind(&row.pipeline_settings_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Runtime DJ mode ──────────────────────────────────────────────────────────
+
+pub async fn get_runtime_dj_mode(pool: &SqlitePool) -> Result<String, sqlx::Error> {
+    let row = sqlx::query("SELECT dj_mode FROM dj_runtime_config WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(row
+        .map(|r| r.get::<String, _>("dj_mode"))
+        .unwrap_or_else(|| "manual".to_string()))
+}
+
+pub async fn save_runtime_dj_mode(pool: &SqlitePool, mode: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO dj_runtime_config (id, dj_mode, updated_at)
+        VALUES (1, ?, strftime('%s','now'))
+        ON CONFLICT(id) DO UPDATE SET
+            dj_mode = excluded.dj_mode,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(mode)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn load_autodj_transition_config(
+    pool: &SqlitePool,
+) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query("SELECT config_json FROM autodj_transition_config WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get::<String, _>("config_json")))
+}
+
+pub async fn save_autodj_transition_config(
+    pool: &SqlitePool,
+    json: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO autodj_transition_config (id, config_json) VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET config_json = excluded.config_json
+        "#,
+    )
+    .bind(json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Waveform cache ───────────────────────────────────────────────────────────
+
+pub async fn get_waveform_cache(
+    pool: &SqlitePool,
+    file_path: &str,
+    mtime_ms: i64,
+    resolution: i64,
+) -> Result<Option<Vec<f32>>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT peaks_json FROM waveform_cache WHERE file_path = ? AND mtime_ms = ? AND resolution = ?",
+    )
+    .bind(file_path)
+    .bind(mtime_ms)
+    .bind(resolution)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    let json: String = r.get("peaks_json");
+    let parsed = serde_json::from_str::<Vec<f32>>(&json).unwrap_or_default();
+    Ok(Some(parsed))
+}
+
+pub async fn save_waveform_cache(
+    pool: &SqlitePool,
+    file_path: &str,
+    mtime_ms: i64,
+    resolution: i64,
+    peaks: &[f32],
+) -> Result<(), sqlx::Error> {
+    let peaks_json = serde_json::to_string(peaks).unwrap_or_else(|_| "[]".to_string());
+    sqlx::query(
+        r#"
+        INSERT INTO waveform_cache (file_path, mtime_ms, resolution, peaks_json, updated_at)
+        VALUES (?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(file_path, mtime_ms, resolution) DO UPDATE SET
+            peaks_json = excluded.peaks_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(file_path)
+    .bind(mtime_ms)
+    .bind(resolution)
+    .bind(peaks_json)
     .execute(pool)
     .await?;
     Ok(())
@@ -522,7 +673,10 @@ pub async fn get_gateway_config(pool: &SqlitePool) -> Result<GatewayConfig, sqlx
     }
 }
 
-pub async fn save_gateway_config(pool: &SqlitePool, config: &GatewayConfig) -> Result<(), sqlx::Error> {
+pub async fn save_gateway_config(
+    pool: &SqlitePool,
+    config: &GatewayConfig,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO gateway_config (id, url, token, auto_connect, sync_queue, sync_vu, vu_throttle_ms)
@@ -551,7 +705,10 @@ pub async fn save_gateway_config(pool: &SqlitePool, config: &GatewayConfig) -> R
 
 use crate::gateway::remote_dj::DjPermissions;
 
-pub async fn get_dj_permissions(pool: &SqlitePool, user_id: &str) -> Result<DjPermissions, sqlx::Error> {
+pub async fn get_dj_permissions(
+    pool: &SqlitePool,
+    user_id: &str,
+) -> Result<DjPermissions, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT can_load_track, can_play_pause, can_seek, can_set_volume,
@@ -727,7 +884,9 @@ pub async fn get_sam_db_config(pool: &SqlitePool) -> Result<SamDbConfig, sqlx::E
 }
 
 /// Load the full config including password — only for internal startup use.
-pub async fn load_sam_db_config_full(pool: &SqlitePool) -> Result<Option<SamDbConfigFull>, sqlx::Error> {
+pub async fn load_sam_db_config_full(
+    pool: &SqlitePool,
+) -> Result<Option<SamDbConfigFull>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT host, port, username, password, database_name, auto_connect, \
          path_prefix_from, path_prefix_to FROM sam_db_config WHERE id = 1",
@@ -784,4 +943,3 @@ pub async fn save_sam_db_config(
     .await?;
     Ok(())
 }
-

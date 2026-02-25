@@ -133,8 +133,8 @@ pub async fn get_event_log(
 
     let entries: Vec<EventLogEntry> = rows
         .into_iter()
-        .map(|(id, timestamp, level, category, event, message, metadata_json, deck, song_id, encoder_id)| {
-            EventLogEntry {
+        .map(
+            |(
                 id,
                 timestamp,
                 level,
@@ -145,8 +145,21 @@ pub async fn get_event_log(
                 deck,
                 song_id,
                 encoder_id,
-            }
-        })
+            )| {
+                EventLogEntry {
+                    id,
+                    timestamp,
+                    level,
+                    category,
+                    event,
+                    message,
+                    metadata_json,
+                    deck,
+                    song_id,
+                    encoder_id,
+                }
+            },
+        )
         .collect();
 
     // Get total count
@@ -171,4 +184,3 @@ pub async fn clear_event_log(pool: &SqlitePool, older_than_days: i64) -> Result<
 
     Ok(result.rows_affected())
 }
-

@@ -3,11 +3,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReportType {
-    DailyBroadcast { date: String },
-    SongPlayHistory { song_id: i64, days: i32 },
-    ListenerTrend { period_days: i32 },
-    RequestLog { start_date: String, end_date: String },
-    StreamUptime { period_days: i32 },
+    DailyBroadcast {
+        date: String,
+    },
+    SongPlayHistory {
+        song_id: i64,
+        days: i32,
+    },
+    ListenerTrend {
+        period_days: i32,
+    },
+    RequestLog {
+        start_date: String,
+        end_date: String,
+    },
+    StreamUptime {
+        period_days: i32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,4 +73,3 @@ pub fn export_report_csv(_report_data: &ReportData) -> Result<String, String> {
     // For now, return placeholder path
     Ok("/tmp/report.csv".to_string())
 }
-

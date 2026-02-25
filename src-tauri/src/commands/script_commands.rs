@@ -1,9 +1,8 @@
 /// `commands/script_commands.rs` — Phase 5 Tauri commands for scripting
-
 use tauri::State;
 
 use crate::{
-    scripting::engine::{Script, ScriptRunResult, ScriptEngine},
+    scripting::engine::{Script, ScriptEngine, ScriptRunResult},
     state::AppState,
 };
 
@@ -50,11 +49,13 @@ pub async fn get_script_log(
     let entries = state.script_engine.get_log(id, limit.unwrap_or(50));
     let json = entries
         .into_iter()
-        .map(|e| serde_json::json!({
-            "level": e.level,
-            "message": e.message,
-            "timestamp": e.timestamp,
-        }))
+        .map(|e| {
+            serde_json::json!({
+                "level": e.level,
+                "message": e.message,
+                "timestamp": e.timestamp,
+            })
+        })
         .collect();
     Ok(json)
 }

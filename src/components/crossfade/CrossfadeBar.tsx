@@ -1,6 +1,11 @@
-import { useState, useEffect } from "react";
-import { ArrowRight, Zap, Settings2 } from "lucide-react";
-import { onCrossfadeProgress, CrossfadeProgressEvent } from "../../lib/bridge";
+import { useEffect, useRef, useState } from "react";
+import { ArrowRightLeft, MoveHorizontal, Settings2 } from "lucide-react";
+import {
+    onCrossfadeProgress,
+    CrossfadeProgressEvent,
+    setManualCrossfade,
+    triggerManualFade,
+} from "../../lib/bridge";
 import { CrossfadeSettingsDialog } from "./CrossfadeSettingsDialog";
 
 interface Props {
@@ -9,17 +14,101 @@ interface Props {
     onForceCrossfade?: () => void;
 }
 
-export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
-    const [progress, setProgress] = useState<CrossfadeProgressEvent | null>(null);
-    const [isAuto, setIsAuto] = useState(true);
+function ManualSlider({
+    value,
+    onChange,
+}: {
+    value: number;
+    onChange: (v: number) => void;
+}) {
+    const ref = useRef<HTMLDivElement>(null);
+    const dragging = useRef(false);
+
+    const read = (clientX: number) => {
+        const el = ref.current;
+        if (!el) return 0;
+        const rect = el.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        return ratio * 2 - 1;
+    };
 
     useEffect(() => {
-        const unsub = onCrossfadeProgress((e) => setProgress(e));
-        return () => { unsub.then((f) => f()); };
+        const onMove = (e: MouseEvent) => {
+            if (!dragging.current) return;
+            onChange(read(e.clientX));
+        };
+        const onUp = () => {
+            dragging.current = false;
+        };
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        return () => {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+        };
+    }, [onChange]);
+
+    const leftPct = ((value + 1) / 2) * 100;
+
+    return (
+        <div
+            ref={ref}
+            className="xfade-bar-wrap"
+            style={{ height: 16, cursor: "ew-resize" }}
+            onMouseDown={(e) => {
+                dragging.current = true;
+                onChange(read(e.clientX));
+            }}
+            role="slider"
+            aria-valuemin={-100}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(value * 100)}
+        >
+            <div className="xfade-bar-left" style={{ width: `${100 - leftPct}%`, opacity: 0.8 }} />
+            <div className="xfade-bar-right" style={{ width: `${leftPct}%`, opacity: 0.8 }} />
+            <div
+                className="xfade-handle"
+                style={{
+                    left: `${leftPct}%`,
+                    width: 18,
+                    height: 18,
+                }}
+            />
+        </div>
+    );
+}
+
+export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
+    const [manualPos, setManualPos] = useState(-1);
+    const [progress, setProgress] = useState<CrossfadeProgressEvent | null>(null);
+    const [fadeMs, setFadeMs] = useState(8000);
+
+    useEffect(() => {
+        const unsub = onCrossfadeProgress((e) => {
+            setProgress(e);
+            // Keep manual slider visually aligned with timed fades.
+            if (e.outgoing_deck === "deck_a" && e.incoming_deck === "deck_b") {
+                setManualPos(e.progress * 2 - 1);
+            } else if (e.outgoing_deck === "deck_b" && e.incoming_deck === "deck_a") {
+                setManualPos(1 - e.progress * 2);
+            }
+        });
+        return () => {
+            unsub.then((f) => f());
+        };
     }, []);
 
-    const pct = progress?.progress ?? 0.5;
-    const isActive = progress !== null && pct > 0 && pct < 1;
+    const applyManual = (value: number) => {
+        const clamped = Math.max(-1, Math.min(1, value));
+        setManualPos(clamped);
+        setManualCrossfade(clamped).catch(console.error);
+    };
+
+    const runTimedFade = (direction: "a_to_b" | "b_to_a") => {
+        triggerManualFade(direction, fadeMs).catch(console.error);
+        if (direction === "a_to_b") setManualPos(1);
+        else setManualPos(-1);
+    };
 
     return (
         <div
@@ -27,129 +116,107 @@ export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
                 display: "flex",
                 flexDirection: "column",
                 gap: 10,
-                padding: "10px 14px",
+                padding: "10px 12px",
                 background: "var(--bg-surface)",
                 border: "1px solid var(--border-default)",
                 borderRadius: "var(--r-lg)",
-                minWidth: 220,
-                maxWidth: 320,
+                minWidth: 240,
+                maxWidth: 360,
                 flex: 1,
             }}
         >
-            {/* Header */}
             <div className="flex items-center justify-between">
-                <span
-                    className="section-label"
-                    style={{ color: isActive ? "var(--amber)" : "var(--text-muted)" }}
-                >
-                    {isActive ? "CROSSFADING" : "CROSSFADE"}
+                <span className="section-label" style={{ color: "var(--amber)" }}>
+                    Fade Control
                 </span>
-                <div className="flex items-center gap-1">
-                    {/* Auto / Manual toggle */}
+                <CrossfadeSettingsDialog
+                    trigger={
+                        <button className="btn btn-ghost btn-icon" title="Crossfade settings" style={{ width: 24, height: 24 }}>
+                            <Settings2 size={12} />
+                        </button>
+                    }
+                />
+            </div>
+
+            <div style={{
+                border: "1px solid var(--border-strong)",
+                borderRadius: "var(--r-md)",
+                background: "var(--bg-input)",
+                padding: 10,
+            }}>
+                <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+                    <span className="mono" style={{ fontSize: 10, color: "var(--amber)", letterSpacing: "0.08em" }}>{deckA.label}</span>
+                    <span className="mono text-muted" style={{ fontSize: 9 }}>{Math.round(manualPos * 100)}%</span>
+                    <span className="mono" style={{ fontSize: 10, color: "var(--cyan)", letterSpacing: "0.08em" }}>{deckB.label}</span>
+                </div>
+                <ManualSlider value={manualPos} onChange={applyManual} />
+                <div className="flex items-center justify-between" style={{ marginTop: 6 }}>
                     <button
                         className="btn btn-ghost"
-                        style={{
-                            padding: "2px 8px",
-                            fontSize: 9,
-                            letterSpacing: "0.1em",
-                            background: isAuto ? "var(--amber-glow)" : "transparent",
-                            borderColor: isAuto ? "var(--amber-dim)" : "var(--border-default)",
-                            color: isAuto ? "var(--amber)" : "var(--text-muted)",
-                        }}
-                        onClick={() => setIsAuto(!isAuto)}
+                        style={{ fontSize: 10, padding: "2px 8px" }}
+                        onClick={() => applyManual(-1)}
                     >
-                        {isAuto ? "AUTO" : "MAN"}
+                        A
                     </button>
-                    <CrossfadeSettingsDialog
-                        trigger={
-                            <button className="btn btn-ghost btn-icon" title="Crossfade settings" style={{ width: 24, height: 24 }}>
-                                <Settings2 size={12} />
-                            </button>
-                        }
-                    />
-                </div>
-            </div>
-
-            {/* Crossfade slider bar */}
-            <div style={{ position: "relative" }}>
-                <div className="xfade-bar-wrap" style={{ height: 8 }}>
-                    <div
-                        className="xfade-bar-left"
-                        style={{ width: `${(1 - pct) * 100}%`, opacity: isActive ? 1 : 0.3 }}
-                    />
-                    <div
-                        className="xfade-bar-right"
-                        style={{ width: `${pct * 100}%`, opacity: isActive ? 1 : 0.3 }}
-                    />
-                    <div
-                        className="xfade-handle"
-                        style={{
-                            left: `${pct * 100}%`,
-                            borderColor: isActive ? "var(--text-primary)" : "var(--border-strong)",
-                        }}
-                    />
-                </div>
-
-                {/* Progress text */}
-                {isActive && (
-                    <div
-                        className="mono"
-                        style={{
-                            textAlign: "center",
-                            marginTop: 6,
-                            fontSize: 10,
-                            color: "var(--amber)",
-                        }}
+                    <MoveHorizontal size={11} style={{ color: "var(--text-muted)" }} />
+                    <button
+                        className="btn btn-ghost"
+                        style={{ fontSize: 10, padding: "2px 8px" }}
+                        onClick={() => applyManual(1)}
                     >
-                        {Math.round(pct * 100)}%
-                    </div>
-                )}
-            </div>
-
-            {/* Deck labels */}
-            <div className="flex items-center justify-between">
-                <span
-                    className="mono font-semibold"
-                    style={{
-                        fontSize: 10,
-                        letterSpacing: "0.1em",
-                        color: pct < 0.5 || !isActive ? "var(--amber)" : "var(--text-muted)",
-                    }}
-                >
-                    {deckA.label}
-                </span>
-                <div className="flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
-                    <ArrowRight size={12} />
+                        B
+                    </button>
                 </div>
-                <span
-                    className="mono font-semibold"
-                    style={{
-                        fontSize: 10,
-                        letterSpacing: "0.1em",
-                        color: pct > 0.5 && isActive ? "var(--cyan)" : "var(--text-muted)",
-                    }}
-                >
-                    {deckB.label}
-                </span>
             </div>
 
-            {/* Force crossfade */}
-            <button
-                className="btn btn-ghost"
-                style={{
-                    fontSize: 10,
-                    letterSpacing: "0.1em",
-                    textTransform: "uppercase",
-                    justifyContent: "center",
-                    borderColor: "var(--red-dim)",
-                    color: "var(--red)",
-                    background: "var(--red-glow)",
-                }}
-                onClick={onForceCrossfade}
-            >
-                <Zap size={11} />
-                FORCE XFADE
-            </button>
+            <div style={{
+                border: "1px solid var(--border-strong)",
+                borderRadius: "var(--r-md)",
+                background: "var(--bg-input)",
+                padding: 10,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+            }}>
+                <div className="flex items-center justify-between">
+                    <span className="section-label">Timed Beat Fade</span>
+                    <span className="mono text-muted" style={{ fontSize: 9 }}>{Math.round(fadeMs / 1000)}s</span>
+                </div>
+
+                <input
+                    type="range"
+                    min={1000}
+                    max={20000}
+                    step={250}
+                    value={fadeMs}
+                    onChange={(e) => setFadeMs(parseInt(e.target.value, 10))}
+                    style={{ width: "100%", accentColor: "var(--amber)", height: 4 }}
+                />
+
+                <div className="flex items-center gap-2">
+                    <button className="btn btn-ghost" style={{ fontSize: 10, flex: 1 }} onClick={() => runTimedFade("a_to_b")}>
+                        A → B
+                    </button>
+                    <button className="btn btn-ghost" style={{ fontSize: 10, flex: 1 }} onClick={() => runTimedFade("b_to_a")}>
+                        B → A
+                    </button>
+                </div>
+
+                <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 10, justifyContent: "center" }}
+                    onClick={onForceCrossfade}
+                >
+                    <ArrowRightLeft size={11} />
+                    Force Crossfade
+                </button>
+            </div>
+
+            {progress && (
+                <div className="mono" style={{ fontSize: 10, color: "var(--text-muted)", textAlign: "center" }}>
+                    {Math.round(progress.progress * 100)}% • {progress.outgoing_deck.toUpperCase()} → {progress.incoming_deck.toUpperCase()}
+                </div>
+            )}
         </div>
     );
 }

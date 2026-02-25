@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     agc::{AgcConfig, GatedAGC},
-    compressor::{Clipper, ClipperConfig, DualBandCompressor, DualBandConfig, MultibandCompressor, MultibandConfig},
+    compressor::{
+        Clipper, ClipperConfig, DualBandCompressor, DualBandConfig, MultibandCompressor,
+        MultibandConfig,
+    },
     eq::{ChannelEQ, EqConfig},
 };
 

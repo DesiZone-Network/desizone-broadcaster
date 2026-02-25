@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Wifi, Settings2, ChartBar, Bot, X, Code, Cloud, BarChart3 } from "lucide-react";
+import { Wifi, Settings2, ChartBar, Bot, X, Code, Cloud, BarChart3, Radio, Cog, LayoutTemplate } from "lucide-react";
 import { TopBar } from "./TopBar";
 import { SourceRow } from "./SourceRow";
 import { BottomPanel } from "./BottomPanel";
@@ -9,97 +9,59 @@ import { AudioPipelineDiagram } from "../pipeline/AudioPipelineDiagram";
 import { ChannelDspDialog } from "../dsp/ChannelDspDialog";
 import { CrossfadeSettingsDialog } from "../crossfade/CrossfadeSettingsDialog";
 import SchedulerPage from "../automation/SchedulerPage";
-import { startCrossfade, startStream, stopStream, getStreamStatus, onStreamConnected, onStreamDisconnected } from "../../lib/bridge";
+import {
+    startCrossfade,
+    stopStream,
+    getStreamStatus,
+    onStreamConnected,
+    onStreamDisconnected,
+    getDeckState,
+} from "../../lib/bridge";
 import type { DeckId } from "../../lib/bridge";
 import { ScriptingPage } from "../../pages/ScriptingPage";
 import { GatewayPage } from "../../pages/GatewayPage";
 import { AnalyticsPage } from "../../pages/AnalyticsPage";
+import StreamingPage from "../../pages/StreamingPage";
+import { SettingsPage } from "../../pages/SettingsPage";
 import { VoiceFXStrip } from "../voice/VoiceFXStrip";
 import { MicSettings } from "../voice/MicSettings";
 import { VoiceTrackRecorder } from "../voice/VoiceTrackRecorder";
 
 type PipelineTarget = { channel: DeckId | "master"; label: string; stage: string } | null;
 
-function StreamDialog({ onClose }: { onClose: () => void }) {
-    const [host, setHost] = useState("localhost");
-    const [port, setPort] = useState(8000);
-    const [mount, setMount] = useState("/stream");
-    const [password, setPassword] = useState("hackme");
-    const [bitrate, setBitrate] = useState(128);
-    const [loading, setLoading] = useState(false);
-
-    const handleStart = async () => {
-        setLoading(true);
-        try {
-            await startStream({ host, port, mount, password, bitrateKbps: bitrate });
-            onClose();
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    return (
-        <div
-            style={{
-                position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                zIndex: 200, backdropFilter: "blur(4px)",
-            }}
-            onClick={onClose}
-        >
-            <div
-                style={{
-                    background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
-                    borderRadius: "var(--r-xl)", padding: 24, width: 380,
-                    animation: "slideIn 160ms ease",
-                }}
-                onClick={(e) => e.stopPropagation()}
-            >
-                <div className="font-semibold uppercase tracking-wide" style={{ fontSize: 12, color: "var(--cyan)", marginBottom: 16 }}>
-                    Icecast / Shoutcast Stream
-                </div>
-                {[
-                    { label: "Host", value: host, set: setHost, type: "text" },
-                    { label: "Port", value: port, set: (v: string) => setPort(parseInt(v)), type: "number" },
-                    { label: "Mount", value: mount, set: setMount, type: "text" },
-                    { label: "Password", value: password, set: setPassword, type: "password" },
-                    { label: "Bitrate (kbps)", value: bitrate, set: (v: string) => setBitrate(parseInt(v)), type: "number" },
-                ].map((f) => (
-                    <div className="form-row" key={f.label}>
-                        <span className="form-label">{f.label}</span>
-                        <input
-                            type={f.type}
-                            className="input"
-                            value={f.value}
-                            onChange={(e) => (f.set as (v: string) => void)(e.target.value)}
-                        />
-                    </div>
-                ))}
-                <div className="flex justify-end gap-2" style={{ marginTop: 20 }}>
-                    <button className="btn btn-ghost" onClick={onClose} style={{ fontSize: 11 }}>Cancel</button>
-                    <button className="btn btn-primary" onClick={handleStart} disabled={loading} style={{ fontSize: 11 }}>
-                        {loading ? "Connecting…" : "Start Stream"}
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-}
 
 export function MainWindow() {
     const [isOnAir, setIsOnAir] = useState(false);
     const [streamConnected, setStreamConnected] = useState(false);
     const [showPipeline, setShowPipeline] = useState(false);
-    const [showStream, setShowStream] = useState(false);
     const [showScheduler, setShowScheduler] = useState(false);
     const [showScripting, setShowScripting] = useState(false);
     const [showGateway, setShowGateway] = useState(false);
     const [showAnalytics, setShowAnalytics] = useState(false);
+    const [showStreaming, setShowStreaming] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
     const [showMicSettings, setShowMicSettings] = useState(false);
     const [showVtRecorder, setShowVtRecorder] = useState(false);
     const [dspTarget, setDspTarget] = useState<PipelineTarget>(null);
+
+    // ── Hideable-panel layout (persisted to localStorage) ─────────────────
+    type LayoutState = { deckA: boolean; deckB: boolean; xfade: boolean; sources: boolean };
+    const [layout, setLayout] = useState<LayoutState>(() => {
+        try {
+            const saved = localStorage.getItem("dz-layout");
+            return saved ? JSON.parse(saved) : { deckA: true, deckB: true, xfade: true, sources: true };
+        } catch {
+            return { deckA: true, deckB: true, xfade: true, sources: true };
+        }
+    });
+    const [showLayoutMenu, setShowLayoutMenu] = useState(false);
+
+    useEffect(() => {
+        localStorage.setItem("dz-layout", JSON.stringify(layout));
+    }, [layout]);
+
+    const toggleLayout = (key: keyof LayoutState) =>
+        setLayout((l) => ({ ...l, [key]: !l[key] }));
 
     // Stream status
     useEffect(() => {
@@ -128,6 +90,32 @@ export function MainWindow() {
 
     const handleForceCrossfade = async () => {
         try {
+            const [a, b] = await Promise.all([getDeckState("deck_a"), getDeckState("deck_b")]);
+            const isPlaying = (s?: string) => s === "playing" || s === "crossfading";
+            const isLoaded = (s?: string) => s === "ready" || s === "paused" || isPlaying(s);
+
+            if (isPlaying(a?.state) && isLoaded(b?.state)) {
+                await startCrossfade("deck_a", "deck_b");
+                return;
+            }
+            if (isPlaying(b?.state) && isLoaded(a?.state)) {
+                await startCrossfade("deck_b", "deck_a");
+                return;
+            }
+
+            // If both are playing, fade out the deck closer to its end.
+            if (isPlaying(a?.state) && isPlaying(b?.state)) {
+                const remA = Math.max(0, (a?.duration_ms ?? 0) - (a?.position_ms ?? 0));
+                const remB = Math.max(0, (b?.duration_ms ?? 0) - (b?.position_ms ?? 0));
+                if (remA <= remB) {
+                    await startCrossfade("deck_a", "deck_b");
+                } else {
+                    await startCrossfade("deck_b", "deck_a");
+                }
+                return;
+            }
+
+            // Final fallback keeps prior behavior.
             await startCrossfade("deck_a", "deck_b");
         } catch (e) {
             console.error(e);
@@ -149,6 +137,7 @@ export function MainWindow() {
             deck_b: "DECK B",
             sound_fx: "SFX",
             aux_1: "AUX 1",
+            aux_2: "AUX 2",
             voice_fx: "VOICE FX",
             master: "MASTER",
         };
@@ -274,10 +263,103 @@ export function MainWindow() {
                     Analytics
                 </button>
 
+                <button
+                    className="btn btn-ghost"
+                    style={{
+                        fontSize: 10,
+                        background: showStreaming ? "rgba(6,182,212,.15)" : "transparent",
+                        borderColor: showStreaming ? "rgba(6,182,212,.5)" : "var(--border-default)",
+                        color: showStreaming ? "var(--cyan)" : "var(--text-muted)",
+                    }}
+                    onClick={() => setShowStreaming((v) => !v)}
+                    title="Encoders & Streaming"
+                >
+                    <Radio size={12} />
+                    Encoders
+                </button>
+
                 <div style={{ marginLeft: "auto" }} />
 
-                {/* Stream buttons */}
-                {streamConnected ? (
+                {/* Layout toggle button + popover */}
+                <div style={{ position: "relative" }}>
+                    <button
+                        className="btn btn-ghost"
+                        style={{
+                            fontSize: 10,
+                            background: showLayoutMenu ? "rgba(245,158,11,.15)" : "transparent",
+                            borderColor: showLayoutMenu ? "var(--amber-dim)" : "var(--border-default)",
+                            color: showLayoutMenu ? "var(--amber)" : "var(--text-muted)",
+                        }}
+                        onClick={() => setShowLayoutMenu((v) => !v)}
+                        title="Toggle panel visibility"
+                    >
+                        <LayoutTemplate size={12} />
+                        Layout
+                    </button>
+
+                    {showLayoutMenu && (
+                        <div
+                            style={{
+                                position: "absolute",
+                                top: "calc(100% + 4px)",
+                                right: 0,
+                                zIndex: 200,
+                                background: "var(--bg-elevated)",
+                                border: "1px solid var(--border-strong)",
+                                borderRadius: "var(--r-md)",
+                                padding: "8px 10px",
+                                minWidth: 140,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 6,
+                                boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
+                            }}
+                            onMouseLeave={() => setShowLayoutMenu(false)}
+                        >
+                            <span className="section-label" style={{ marginBottom: 2 }}>Visible Panels</span>
+                            {(
+                                [
+                                    { key: "deckA",   label: "Deck A"    },
+                                    { key: "deckB",   label: "Deck B"    },
+                                    { key: "xfade",   label: "Crossfade" },
+                                    { key: "sources", label: "Sources"   },
+                                ] as { key: keyof LayoutState; label: string }[]
+                            ).map(({ key, label }) => (
+                                <label
+                                    key={key}
+                                    className="flex items-center gap-2"
+                                    style={{ cursor: "pointer", userSelect: "none" }}
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={layout[key]}
+                                        onChange={() => toggleLayout(key)}
+                                        style={{ accentColor: "var(--amber)", width: 12, height: 12 }}
+                                    />
+                                    <span style={{ fontSize: 11, color: "var(--text-primary)" }}>{label}</span>
+                                </label>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                <button
+                    className="btn btn-ghost"
+                    style={{
+                        fontSize: 10,
+                        background: showSettings ? "rgba(148,163,184,.15)" : "transparent",
+                        borderColor: showSettings ? "rgba(148,163,184,.4)" : "var(--border-default)",
+                        color: showSettings ? "#94a3b8" : "var(--text-muted)",
+                    }}
+                    onClick={() => setShowSettings((v) => !v)}
+                    title="Settings"
+                >
+                    <Cog size={12} />
+                    Settings
+                </button>
+
+                {/* Stream status indicator */}
+                {streamConnected && (
                     <button
                         className="btn btn-danger"
                         style={{ fontSize: 10 }}
@@ -285,20 +367,6 @@ export function MainWindow() {
                     >
                         <Wifi size={12} />
                         Stop Stream
-                    </button>
-                ) : (
-                    <button
-                        className="btn btn-ghost"
-                        style={{
-                            fontSize: 10,
-                            borderColor: "var(--cyan-dim)",
-                            color: "var(--cyan)",
-                            background: "var(--cyan-glow)",
-                        }}
-                        onClick={() => setShowStream(true)}
-                    >
-                        <Wifi size={12} />
-                        Start Stream
                     </button>
                 )}
             </div>
@@ -334,33 +402,65 @@ export function MainWindow() {
                     </div>
                 )}
 
-                {/* Deck area + Crossfade */}
-                <div
-                    style={{
-                        display: "flex",
-                        gap: 10,
-                        flexShrink: 0,
-                    }}
-                >
-                    <DeckPanel
-                        deckId="deck_a"
-                        label="DECK A"
-                        accentColor="#f59e0b"
-                        isOnAir={isOnAir}
-                    />
+                {/* Deck area + Crossfade — conditionally rendered */}
+                {(layout.deckA || layout.deckB) ? (
+                    <div
+                        style={{
+                            display: "flex",
+                            gap: 10,
+                            flexShrink: 0,
+                        }}
+                    >
+                        {layout.deckA && (
+                            <DeckPanel
+                                deckId="deck_a"
+                                label="DECK A"
+                                accentColor="#f59e0b"
+                                isOnAir={isOnAir}
+                                onCollapse={() => toggleLayout("deckA")}
+                            />
+                        )}
 
-                    <CrossfadeBar
-                        deckA={{ label: "A" }}
-                        deckB={{ label: "B" }}
-                        onForceCrossfade={handleForceCrossfade}
-                    />
+                        {layout.xfade && layout.deckA && layout.deckB && (
+                            <CrossfadeBar
+                                deckA={{ label: "A" }}
+                                deckB={{ label: "B" }}
+                                onForceCrossfade={handleForceCrossfade}
+                            />
+                        )}
 
-                    <DeckPanel
-                        deckId="deck_b"
-                        label="DECK B"
-                        accentColor="#06b6d4"
-                    />
-                </div>
+                        {layout.deckB && (
+                            <DeckPanel
+                                deckId="deck_b"
+                                label="DECK B"
+                                accentColor="#06b6d4"
+                                onCollapse={() => toggleLayout("deckB")}
+                            />
+                        )}
+                    </div>
+                ) : (
+                    /* Restore bar — shown when both decks are hidden */
+                    <div
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: 8,
+                            padding: "8px 12px",
+                            background: "var(--bg-elevated)",
+                            border: "1px dashed var(--border-strong)",
+                            borderRadius: "var(--r-md)",
+                            flexShrink: 0,
+                            cursor: "pointer",
+                        }}
+                        onClick={() => setLayout((l) => ({ ...l, deckA: true, deckB: true, xfade: true }))}
+                    >
+                        <LayoutTemplate size={12} style={{ color: "var(--text-muted)" }} />
+                        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                            Decks hidden — click to restore
+                        </span>
+                    </div>
+                )}
 
                 <VoiceFXStrip
                     onOpenSettings={() => setShowMicSettings(true)}
@@ -368,7 +468,7 @@ export function MainWindow() {
                 />
 
                 {/* AUX / SFX / Voice row */}
-                <SourceRow />
+                {layout.sources && <SourceRow />}
 
                 {/* Bottom panel: Queue | Library | Requests | History | Logs */}
                 <BottomPanel />
@@ -384,9 +484,6 @@ export function MainWindow() {
                     }
                 />
             )}
-
-            {/* Stream dialog */}
-            {showStream && <StreamDialog onClose={() => setShowStream(false)} />}
 
             {/* Mic settings */}
             {showMicSettings && <MicSettings onClose={() => setShowMicSettings(false)} />}
@@ -566,6 +663,124 @@ export function MainWindow() {
                         </div>
                         <div style={{ flex: 1, overflow: "hidden" }}>
                             <GatewayPage />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Streaming / Encoders overlay */}
+            {showStreaming && (
+                <div
+                    style={{
+                        position: "fixed", inset: 0,
+                        background: "rgba(0,0,0,0.65)",
+                        zIndex: 151,
+                        backdropFilter: "blur(4px)",
+                        display: "flex",
+                        alignItems: "stretch",
+                    }}
+                    onClick={() => setShowStreaming(false)}
+                >
+                    <div
+                        style={{
+                            position: "absolute",
+                            top: 0, right: 0, bottom: 0,
+                            width: "min(900px, 95vw)",
+                            background: "var(--bg-panel)",
+                            borderLeft: "1px solid var(--border-strong)",
+                            display: "flex",
+                            flexDirection: "column",
+                            overflow: "hidden",
+                            animation: "slideInRight 200ms ease",
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "10px 14px",
+                                borderBottom: "1px solid var(--border-default)",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <Radio size={15} style={{ color: "var(--cyan)" }} />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                                Encoders & Streaming
+                            </span>
+                            <button
+                                onClick={() => setShowStreaming(false)}
+                                style={{
+                                    marginLeft: "auto",
+                                    background: "none", border: "none",
+                                    color: "var(--text-dim)", cursor: "pointer",
+                                }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                        <div style={{ flex: 1, overflow: "hidden" }}>
+                            <StreamingPage />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Settings overlay */}
+            {showSettings && (
+                <div
+                    style={{
+                        position: "fixed", inset: 0,
+                        background: "rgba(0,0,0,0.65)",
+                        zIndex: 151,
+                        backdropFilter: "blur(4px)",
+                        display: "flex",
+                        alignItems: "stretch",
+                    }}
+                    onClick={() => setShowSettings(false)}
+                >
+                    <div
+                        style={{
+                            position: "absolute",
+                            top: 0, right: 0, bottom: 0,
+                            width: "min(900px, 95vw)",
+                            background: "var(--bg-panel)",
+                            borderLeft: "1px solid var(--border-strong)",
+                            display: "flex",
+                            flexDirection: "column",
+                            overflow: "hidden",
+                            animation: "slideInRight 200ms ease",
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "10px 14px",
+                                borderBottom: "1px solid var(--border-default)",
+                                flexShrink: 0,
+                            }}
+                        >
+                            <Cog size={15} style={{ color: "#94a3b8" }} />
+                            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+                                Settings
+                            </span>
+                            <button
+                                onClick={() => setShowSettings(false)}
+                                style={{
+                                    marginLeft: "auto",
+                                    background: "none", border: "none",
+                                    color: "var(--text-dim)", cursor: "pointer",
+                                }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                        <div style={{ flex: 1, overflow: "hidden" }}>
+                            <SettingsPage />
                         </div>
                     </div>
                 </div>

@@ -14,11 +14,7 @@ use crate::{
     gateway::client::GatewayClient,
     gateway::remote_dj::{DjPermissions, RemoteSession},
     scripting::engine::ScriptEngine,
-    stream::{
-        broadcaster::Broadcaster,
-        encoder_manager::EncoderManager,
-        icecast::StreamHandle,
-    },
+    stream::{broadcaster::Broadcaster, encoder_manager::EncoderManager, icecast::StreamHandle},
 };
 
 /// Global application state — shared across all Tauri command handlers.
@@ -103,4 +99,3 @@ impl AppState {
 // and access it only from async command handlers (one at a time, via lock).
 unsafe impl Send for AppState {}
 unsafe impl Sync for AppState {}
-

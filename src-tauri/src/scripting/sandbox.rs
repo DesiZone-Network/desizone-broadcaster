@@ -3,7 +3,6 @@
 /// Every script VM is created with a restricted set of standard libraries.
 /// Dangerous libraries (os, io, debug, package, require) are omitted by default.
 /// Scripts can be granted additional trust levels through their configuration.
-
 use mlua::{Lua, Result as LuaResult};
 
 /// Controls which Lua standard libraries are available to a script.
@@ -28,7 +27,9 @@ pub fn create_sandboxed_vm(trust: TrustLevel) -> LuaResult<Lua> {
     let lua = Lua::new();
 
     // Load safe standard libs
-    lua.load_std_libs(mlua::StdLib::TABLE | mlua::StdLib::STRING | mlua::StdLib::MATH | mlua::StdLib::COROUTINE)?;
+    lua.load_std_libs(
+        mlua::StdLib::TABLE | mlua::StdLib::STRING | mlua::StdLib::MATH | mlua::StdLib::COROUTINE,
+    )?;
 
     if trust == TrustLevel::FileRead || trust == TrustLevel::Elevated {
         lua.load_std_libs(mlua::StdLib::IO)?;
