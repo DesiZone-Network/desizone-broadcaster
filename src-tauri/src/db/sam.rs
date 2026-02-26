@@ -707,6 +707,8 @@ pub async fn create_category(
 
     if table_exists(pool, "category").await {
         let parent = parent_id.unwrap_or(0).max(0);
+
+        // Validate parent existence and derive levelindex in a single query.
         let levelindex: i32 = if parent > 0 {
             let maybe_level = sqlx::query_scalar::<_, i32>(
                 "SELECT COALESCE(levelindex, 0) + 1 FROM category WHERE ID = ? LIMIT 1",
@@ -728,6 +730,19 @@ pub async fn create_category(
         } else {
             0
         };
+
+        // Reject duplicate names under the same parent.
+        let duplicate_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM category WHERE parentID = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?))",
+        )
+        .bind(parent)
+        .bind(trimmed)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("DB error checking duplicate category: {e}"))?;
+        if duplicate_count > 0 {
+            return Err(format!("Category '{trimmed}' already exists"));
+        }
 
         let itemindex: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(itemindex), -1) + 1 FROM category WHERE parentID = ?",
@@ -759,6 +774,18 @@ pub async fn create_category(
     }
 
     if table_exists(pool, "catlist").await {
+        // Reject duplicate names in catlist.
+        let duplicate_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM catlist WHERE LOWER(TRIM(catname)) = LOWER(TRIM(?))",
+        )
+        .bind(trimmed)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("DB error checking duplicate category: {e}"))?;
+        if duplicate_count > 0 {
+            return Err(format!("Category '{trimmed}' already exists"));
+        }
+
         let result = sqlx::query("INSERT INTO catlist (catname) VALUES (?)")
             .bind(trimmed)
             .execute(pool)
