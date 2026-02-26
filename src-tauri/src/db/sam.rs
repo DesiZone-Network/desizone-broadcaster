@@ -707,17 +707,31 @@ pub async fn create_category(
 
     if table_exists(pool, "category").await {
         let parent = parent_id.unwrap_or(0).max(0);
-        if parent > 0 {
-            let parent_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM category WHERE ID = ?")
-                .bind(parent)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| format!("DB error validating parent category: {e}"))?;
-            if parent_exists == 0 {
-                return Err(format!("Parent category {parent} does not exist"));
-            }
-        }
 
+        // Validate parent existence and derive levelindex in a single query.
+        let levelindex: i32 = if parent > 0 {
+            let maybe_level = sqlx::query_scalar::<_, i32>(
+                "SELECT COALESCE(levelindex, 0) + 1 FROM category WHERE ID = ? LIMIT 1",
+            )
+            .bind(parent)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("DB error reading parent category: {e}"))?;
+
+            match maybe_level {
+                Some(level) => level,
+                None => {
+                    return Err(format!(
+                        "Parent category with ID {} does not exist",
+                        parent
+                    ));
+                }
+            }
+        } else {
+            0
+        };
+
+        // Reject duplicate names under the same parent.
         let duplicate_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM category WHERE parentID = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?))",
         )
@@ -729,19 +743,6 @@ pub async fn create_category(
         if duplicate_count > 0 {
             return Err(format!("Category '{trimmed}' already exists"));
         }
-
-        let levelindex: i32 = if parent > 0 {
-            sqlx::query_scalar::<_, i32>(
-                "SELECT COALESCE(levelindex, 0) + 1 FROM category WHERE ID = ? LIMIT 1",
-            )
-            .bind(parent)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("DB error reading parent category: {e}"))?
-            .unwrap_or(1)
-        } else {
-            0
-        };
 
         let itemindex: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(itemindex), -1) + 1 FROM category WHERE parentID = ?",
@@ -773,6 +774,7 @@ pub async fn create_category(
     }
 
     if table_exists(pool, "catlist").await {
+        // Reject duplicate names in catlist.
         let duplicate_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM catlist WHERE LOWER(TRIM(catname)) = LOWER(TRIM(?))",
         )

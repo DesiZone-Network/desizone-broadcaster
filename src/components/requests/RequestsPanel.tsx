@@ -15,44 +15,9 @@ interface RequestRow {
     song: SamSong | null;
 }
 
-const MOCK_ROWS: RequestRow[] = [
-    {
-        request: {
-            id: -1,
-            song_id: 0,
-            song_title: "Dil Se Re",
-            artist: "A.R. Rahman",
-            requester_name: "Aisha K.",
-            requester_platform: "web",
-            requester_ip: null,
-            requested_at: Math.floor(Date.now() / 1000) - 180,
-            status: "pending",
-            rejection_reason: null,
-            played_at: null,
-        },
-        song: null,
-    },
-    {
-        request: {
-            id: -2,
-            song_id: 0,
-            song_title: "Ek Ladki Ko Dekha",
-            artist: "RD Burman",
-            requester_name: "Ravi S.",
-            requester_platform: "discord",
-            requester_ip: null,
-            requested_at: Math.floor(Date.now() / 1000) - 480,
-            status: "pending",
-            rejection_reason: null,
-            played_at: null,
-        },
-        song: null,
-    },
-];
-
 function timeAgo(epochSecs: number): string {
-    const diff = Math.floor(Date.now() / 1000 - epochSecs);
-    if (diff < 60) return `${Math.max(0, diff)}s ago`;
+    const diff = Math.max(0, Math.floor(Date.now() / 1000 - epochSecs));
+    if (diff < 60) return `${diff}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     return `${Math.floor(diff / 3600)}h ago`;
 }
@@ -86,7 +51,6 @@ function PlatformBadge({ platform }: { platform: string | null }) {
 export function RequestsPanel() {
     const [rows, setRows] = useState<RequestRow[]>([]);
     const [loading, setLoading] = useState(false);
-    const [usingMock, setUsingMock] = useState(false);
 
     const loadRequests = async () => {
         setLoading(true);
@@ -101,9 +65,7 @@ export function RequestsPanel() {
             setRows(hydrated);
         } catch (e) {
             console.error(e);
-            // Keep Requests panel useful even before scheduler request DB is configured.
-            setRows(MOCK_ROWS);
-            setUsingMock(true);
+            setRows([]);
         } finally {
             setLoading(false);
         }
@@ -116,13 +78,13 @@ export function RequestsPanel() {
     }, []);
 
     const handleAccept = async (id: number | null) => {
-        if (id == null || id < 0) return;
+        if (id == null) return;
         await acceptRequestP3(id).catch(console.error);
         await loadRequests();
     };
 
     const handleReject = async (id: number | null) => {
-        if (id == null || id < 0) return;
+        if (id == null) return;
         await rejectRequestP3(id).catch(console.error);
         await loadRequests();
     };
@@ -133,11 +95,6 @@ export function RequestsPanel() {
                 <div className="flex items-center gap-2">
                     <MessageSquare size={12} style={{ color: "var(--text-muted)" }} />
                     <span className="section-label">Requests</span>
-                    {usingMock && (
-                        <span className="mono" style={{ fontSize: 9, color: "var(--text-muted)", border: "1px solid var(--border-default)", borderRadius: 8, padding: "1px 5px" }}>
-                            demo
-                        </span>
-                    )}
                     {rows.length > 0 && (
                         <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: "#fff", background: "var(--red)", padding: "1px 6px", borderRadius: 10 }}>
                             {rows.length}
