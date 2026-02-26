@@ -274,7 +274,9 @@ mod tests {
     use super::*;
 
     async fn setup_pool() -> SqlitePool {
-        let pool = SqlitePool::connect("sqlite::memory:")
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
             .await
             .expect("in-memory sqlite pool");
 
