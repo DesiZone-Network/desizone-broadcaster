@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,16 +120,42 @@ pub async fn get_event_log(
     start_time: Option<i64>,
     end_time: Option<i64>,
     search: Option<&str>,
+    deck: Option<&str>,
 ) -> Result<(Vec<EventLogEntry>, i64), sqlx::Error> {
-    // For simplicity, just return all events for now
-    // TODO: Implement proper filtering
-    let rows = sqlx::query_as::<_, (i64, i64, String, String, String, String, Option<String>, Option<String>, Option<i64>, Option<i64>)>(
-        "SELECT id, timestamp, level, category, event, message, metadata_json, deck, song_id, encoder_id FROM event_log ORDER BY timestamp DESC LIMIT ? OFFSET ?"
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let mut query_builder = QueryBuilder::<Sqlite>::new(
+        "SELECT id, timestamp, level, category, event, message, metadata_json, deck, song_id, encoder_id FROM event_log WHERE 1=1",
+    );
+
+    append_filters(
+        &mut query_builder,
+        level,
+        category,
+        start_time,
+        end_time,
+        search,
+        deck,
+    );
+
+    query_builder.push(" ORDER BY timestamp DESC LIMIT ");
+    query_builder.push_bind(limit.max(1));
+    query_builder.push(" OFFSET ");
+    query_builder.push_bind(offset.max(0));
+
+    let rows = query_builder
+        .build_query_as::<(
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        )>()
+        .fetch_all(pool)
+        .await?;
 
     let entries: Vec<EventLogEntry> = rows
         .into_iter()
@@ -162,11 +188,69 @@ pub async fn get_event_log(
         )
         .collect();
 
-    // Get total count
-    let count_query = "SELECT COUNT(*) FROM event_log WHERE 1=1";
-    let total: i64 = sqlx::query_scalar(count_query).fetch_one(pool).await?;
+    let mut count_query_builder =
+        QueryBuilder::<Sqlite>::new("SELECT COUNT(*) FROM event_log WHERE 1=1");
+    append_filters(
+        &mut count_query_builder,
+        level,
+        category,
+        start_time,
+        end_time,
+        search,
+        deck,
+    );
+    let total: i64 = count_query_builder
+        .build_query_scalar()
+        .fetch_one(pool)
+        .await?;
 
     Ok((entries, total))
+}
+
+fn append_filters(
+    query_builder: &mut QueryBuilder<'_, Sqlite>,
+    level: Option<&str>,
+    category: Option<&str>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    search: Option<&str>,
+    deck: Option<&str>,
+) {
+    if let Some(level) = level.filter(|value| !value.trim().is_empty()) {
+        query_builder.push(" AND level = ");
+        query_builder.push_bind(level.trim());
+    }
+
+    if let Some(category) = category.filter(|value| !value.trim().is_empty()) {
+        query_builder.push(" AND category = ");
+        query_builder.push_bind(category.trim());
+    }
+
+    if let Some(start_time) = start_time {
+        query_builder.push(" AND timestamp >= ");
+        query_builder.push_bind(start_time);
+    }
+
+    if let Some(end_time) = end_time {
+        query_builder.push(" AND timestamp <= ");
+        query_builder.push_bind(end_time);
+    }
+
+    if let Some(deck) = deck.filter(|value| !value.trim().is_empty()) {
+        query_builder.push(" AND deck = ");
+        query_builder.push_bind(deck.trim());
+    }
+
+    if let Some(search) = search.filter(|value| !value.trim().is_empty()) {
+        let pattern = format!("%{}%", search.trim().to_lowercase());
+        query_builder.push(" AND (LOWER(event) LIKE ");
+        query_builder.push_bind(pattern.clone());
+        query_builder.push(" OR LOWER(message) LIKE ");
+        query_builder.push_bind(pattern.clone());
+        query_builder.push(" OR LOWER(COALESCE(metadata_json, '')) LIKE ");
+        query_builder.push_bind(pattern);
+        query_builder.push(")");
+    }
 }
 
 /// Clear old event log entries
@@ -183,4 +267,87 @@ pub async fn clear_event_log(pool: &SqlitePool, older_than_days: i64) -> Result<
         .await?;
 
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE event_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                level TEXT NOT NULL,
+                category TEXT NOT NULL,
+                event TEXT NOT NULL,
+                message TEXT NOT NULL,
+                metadata_json TEXT,
+                deck TEXT,
+                song_id INTEGER,
+                encoder_id INTEGER
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create event_log table");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn get_event_log_applies_filters_and_count() {
+        let pool = setup_pool().await;
+
+        sqlx::query("INSERT INTO event_log (timestamp, level, category, event, message, metadata_json, deck) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(1_700_000_000_000_i64)
+            .bind("info")
+            .bind("stream")
+            .bind("encoder_connected")
+            .bind("Connected")
+            .bind("{\"source\":\"icecast\"}")
+            .bind("deck_a")
+            .execute(&pool)
+            .await
+            .expect("insert row 1");
+
+        sqlx::query("INSERT INTO event_log (timestamp, level, category, event, message, metadata_json, deck) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(1_700_000_100_000_i64)
+            .bind("error")
+            .bind("audio")
+            .bind("buffer_underrun")
+            .bind("Underrun detected")
+            .bind("{\"severity\":\"high\"}")
+            .bind("deck_b")
+            .execute(&pool)
+            .await
+            .expect("insert row 2");
+
+        let (rows, total) = get_event_log(
+            &pool,
+            20,
+            0,
+            Some("info"),
+            Some("stream"),
+            Some(1_699_999_999_000),
+            Some(1_700_000_050_000),
+            Some("icecast"),
+            Some("deck_a"),
+        )
+        .await
+        .expect("filtered event log");
+
+        assert_eq!(total, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event, "encoder_connected");
+        assert_eq!(rows[0].deck.as_deref(), Some("deck_a"));
+    }
 }
