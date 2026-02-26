@@ -25,6 +25,7 @@ import {
     QueueEntry,
     SamSong,
 } from "../../lib/bridge";
+import { serializeSongDragPayload } from "../../lib/songDrag";
 
 interface QueueItem extends QueueEntry {
     song?: SamSong;
@@ -59,6 +60,12 @@ function SortableQueueRow({
                 transition,
                 opacity: isDragging ? 0.5 : 1,
                 cursor: "default",
+            }}
+            draggable={Boolean(item.song?.filename)}
+            onDragStart={(e) => {
+                if (!item.song?.filename) return;
+                e.dataTransfer.setData("text/plain", serializeSongDragPayload(item.song, "queue"));
+                e.dataTransfer.effectAllowed = "copy";
             }}
         >
             <div className="drag-handle" {...attributes} {...listeners}>

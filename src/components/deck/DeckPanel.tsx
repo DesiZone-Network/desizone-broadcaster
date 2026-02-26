@@ -14,6 +14,7 @@ import { writeEventLog } from "../../lib/bridge7";
 import type { SamSong } from "../../lib/bridge";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { VUMeter } from "./VUMeter";
+import { parseSongDragPayload } from "../../lib/songDrag";
 
 interface Props {
     deckId: DeckId;
@@ -30,14 +31,22 @@ function formatTime(ms: number) {
     return `${m.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}`;
 }
 
-function VolumeSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+function VolumeSlider({
+    value,
+    max = 1.5,
+    onChange,
+}: {
+    value: number;
+    max?: number;
+    onChange: (v: number) => void;
+}) {
     const ref = useRef<HTMLDivElement>(null);
     const dragging = useRef(false);
 
     const getVal = (e: MouseEvent | React.MouseEvent) => {
         const el = ref.current!;
         const rect = el.getBoundingClientRect();
-        return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        return Math.max(0, Math.min(max, ((e.clientX - rect.left) / rect.width) * max));
     };
 
     const handleMouseDown = (e: React.MouseEvent) => {
@@ -63,14 +72,14 @@ function VolumeSlider({ value, onChange }: { value: number; onChange: (v: number
             role="slider"
             aria-valuenow={Math.round(value * 100)}
             aria-valuemin={0}
-            aria-valuemax={100}
+            aria-valuemax={Math.round(max * 100)}
         >
             <div className="slider-track" style={{ height: 4 }}>
-                <div className="slider-range" style={{ width: `${value * 100}%` }} />
+                <div className="slider-range" style={{ width: `${(value / max) * 100}%` }} />
             </div>
             <div
                 className="slider-thumb"
-                style={{ position: "absolute", left: `${value * 100}%`, transform: "translateX(-50%)" }}
+                style={{ position: "absolute", left: `${(value / max) * 100}%`, transform: "translateX(-50%)" }}
             />
         </div>
     );
@@ -385,8 +394,8 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                     setIsDragOver(false);
                     const raw = e.dataTransfer.getData("text/plain");
                     if (!raw) return;
-                    let song: SamSong;
-                    try { song = JSON.parse(raw); } catch { return; }
+                    const song = parseSongDragPayload(raw) as SamSong | null;
+                    if (!song) return;
                     try {
                         await loadTrack(deckId, song.filename, song.id);
                         setLoadError(null);
@@ -506,11 +515,14 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
             <div className="flex items-center gap-3">
                 <Volume2 size={12} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
                 <div style={{ flex: 1 }}>
-                    <VolumeSlider value={volume} onChange={handleVolumeChange} />
+                    <VolumeSlider value={volume} max={1.5} onChange={handleVolumeChange} />
                 </div>
                 <span className="mono" style={{ fontSize: 10, color: accentColor, minWidth: 28 }}>
                     {Math.round(volume * 100)}%
                 </span>
+                <button className="btn btn-ghost btn-icon" style={{ width: 18, height: 18 }} title="Reset volume to 100%" onClick={() => handleVolumeChange(1)}>
+                    ↺
+                </button>
 
                 {/* Air / Cue toggle */}
                 <div className="flex" style={{ border: "1px solid var(--border-strong)", borderRadius: "var(--r-md)", overflow: "hidden" }}>
@@ -565,6 +577,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                 <span className="mono" style={{ fontSize: 9, minWidth: 46, color: "var(--text-secondary)", textAlign: "right" }}>
                     {pitchPct >= 0 ? "+" : ""}{pitchPct.toFixed(1)}%
                 </span>
+                <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset pitch" onClick={() => handlePitchChange(0)}>↺</button>
             </div>
 
             <div className="flex items-center gap-2" style={{ marginTop: 2 }}>
@@ -581,6 +594,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                 <span className="mono" style={{ fontSize: 9, minWidth: 46, color: "var(--text-secondary)", textAlign: "right" }}>
                     {tempoPct >= 0 ? "+" : ""}{tempoPct.toFixed(1)}%
                 </span>
+                <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset tempo" onClick={() => handleTempoChange(0)}>↺</button>
             </div>
         </div>
     );
