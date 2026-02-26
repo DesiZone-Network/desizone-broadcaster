@@ -143,6 +143,7 @@ export async function getEventLog(params: {
   startTime?: number;
   endTime?: number;
   search?: string;
+  deck?: string;
 }): Promise<EventLogResponse> {
   return invoke('get_event_log', params);
 }

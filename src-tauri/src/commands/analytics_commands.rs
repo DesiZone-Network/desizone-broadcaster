@@ -111,6 +111,7 @@ pub async fn get_event_log(
     start_time: Option<i64>,
     end_time: Option<i64>,
     search: Option<String>,
+    deck: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<EventLogResponse, String> {
     let pool = state
@@ -127,6 +128,7 @@ pub async fn get_event_log(
         start_time,
         end_time,
         search.as_deref(),
+        deck.as_deref(),
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -176,8 +178,23 @@ pub async fn get_health_history(
 // ── Reports ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn generate_report(report_type: ReportType) -> Result<ReportData, String> {
-    Ok(reports::generate_report(report_type))
+pub async fn generate_report(
+    report_type: ReportType,
+    state: State<'_, AppState>,
+) -> Result<ReportData, String> {
+    let pool = state
+        .local_db
+        .as_ref()
+        .ok_or("Local database not available")?;
+
+    let sam_pool = {
+        let guard = state.sam_db.read().await;
+        guard.clone()
+    };
+
+    reports::generate_report(pool, sam_pool.as_ref(), report_type)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
