@@ -16,8 +16,8 @@ interface RequestRow {
 }
 
 function timeAgo(epochSecs: number): string {
-    const diff = Math.floor(Date.now() / 1000 - epochSecs);
-    if (diff < 60) return `${Math.max(0, diff)}s ago`;
+    const diff = Math.max(0, Math.floor(Date.now() / 1000 - epochSecs));
+    if (diff < 60) return `${diff}s ago`;
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     return `${Math.floor(diff / 3600)}h ago`;
 }
