@@ -598,6 +598,7 @@ pub struct SongUpdateFields {
     pub label: Option<String>,
     pub isrc: Option<String>,
     pub upc: Option<String>,
+    pub xfade: Option<String>,
     pub overlay: Option<String>,
     pub status: Option<i32>,
 }
@@ -634,6 +635,7 @@ pub async fn update_song(
     push_field!("songtype", fields.songtype);
     push_field!("mood", fields.mood);
     push_field!("label", fields.label);
+    push_field!("xfade", fields.xfade);
     push_field!("overlay", fields.overlay);
 
     // Numeric fields
@@ -688,4 +690,79 @@ pub async fn update_song(
     qb.push(" WHERE ID = ").push_bind(song_id);
     let result = qb.build().execute(pool).await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// Create a SAM category/folder.
+///
+/// Supports both modern `category` schema and legacy `catlist` schema.
+pub async fn create_category(
+    pool: &MySqlPool,
+    name: &str,
+    parent_id: Option<i64>,
+) -> Result<SamCategory, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Category name cannot be empty".to_string());
+    }
+
+    if table_exists(pool, "category").await {
+        let parent = parent_id.unwrap_or(0).max(0);
+        let levelindex: i32 = if parent > 0 {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT COALESCE(levelindex, 0) + 1 FROM category WHERE ID = ? LIMIT 1",
+            )
+            .bind(parent)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("DB error reading parent category: {e}"))?
+            .unwrap_or(1)
+        } else {
+            0
+        };
+
+        let itemindex: i64 = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(itemindex), -1) + 1 FROM category WHERE parentID = ?",
+        )
+        .bind(parent)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("DB error reading category sort index: {e}"))?;
+
+        let result = sqlx::query(
+            "INSERT INTO category (name, parentID, levelindex, itemindex) VALUES (?, ?, ?, ?)",
+        )
+        .bind(trimmed)
+        .bind(parent)
+        .bind(levelindex)
+        .bind(itemindex)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("DB error creating category: {e}"))?;
+
+        let id = result.last_insert_id() as i64;
+        return Ok(SamCategory {
+            id,
+            catname: trimmed.to_string(),
+            parent_id: parent,
+            levelindex,
+            itemindex,
+        });
+    }
+
+    if table_exists(pool, "catlist").await {
+        let result = sqlx::query("INSERT INTO catlist (catname) VALUES (?)")
+            .bind(trimmed)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("DB error creating category: {e}"))?;
+        return Ok(SamCategory {
+            id: result.last_insert_id() as i64,
+            catname: trimmed.to_string(),
+            parent_id: 0,
+            levelindex: 0,
+            itemindex: 0,
+        });
+    }
+
+    Err("No SAM category table found (`category` or `catlist`)".to_string())
 }

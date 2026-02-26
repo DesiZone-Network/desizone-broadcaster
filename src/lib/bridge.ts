@@ -414,6 +414,11 @@ export const getSamCategories = () =>
 export const getSongsInCategory = (categoryId: number, limit = 500, offset = 0) =>
   invoke<SamSong[]>("get_songs_in_category", { categoryId, limit, offset });
 
+/** Create a folder/category in SAM (`category` or `catlist`). */
+export const createSamCategory = (name: string, parentId?: number | null) =>
+  invoke<SamCategory>("create_sam_category", { name, parentId: parentId ?? null });
+
+
 // ── Streaming ────────────────────────────────────────────────────────────────
 
 export const startStream = (params: {

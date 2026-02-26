@@ -4,7 +4,7 @@ use tauri::State;
 use crate::{
     db::{
         local::{get_sam_db_config, save_sam_db_config, SamDbConfig},
-        sam::{connect, get_categories, SamCategory},
+        sam::{connect, create_category, get_categories, SamCategory},
     },
     state::AppState,
 };
@@ -181,6 +181,17 @@ pub async fn get_sam_categories(state: State<'_, AppState>) -> Result<Vec<SamCat
     get_categories(pool)
         .await
         .map_err(|e| format!("SAM DB error: {e}"))
+}
+
+#[tauri::command]
+pub async fn create_sam_category(
+    name: String,
+    parent_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<SamCategory, String> {
+    let guard = state.sam_db.read().await;
+    let pool = guard.as_ref().ok_or("SAM DB not connected")?;
+    create_category(pool, &name, parent_id).await
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

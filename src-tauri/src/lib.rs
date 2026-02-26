@@ -45,8 +45,9 @@ use commands::{
         update_song,
     },
     sam_db_commands::{
-        connect_sam_db, disconnect_sam_db, get_sam_categories, get_sam_db_config_cmd,
-        get_sam_db_status, save_sam_db_config_cmd, test_sam_db_connection,
+        connect_sam_db, create_sam_category, disconnect_sam_db, get_sam_categories,
+        get_sam_db_config_cmd, get_sam_db_status, save_sam_db_config_cmd,
+        test_sam_db_connection,
     },
     scheduler_commands::{
         accept_request_p3, delete_rotation_rule, delete_show, enqueue_next_clockwheel_track,
@@ -997,6 +998,7 @@ pub fn run() {
             save_sam_db_config_cmd,
             get_sam_db_status,
             get_sam_categories,
+            create_sam_category,
             // Phase 7 — Analytics
             get_top_songs,
             get_hourly_heatmap,

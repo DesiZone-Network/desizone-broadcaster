@@ -19,6 +19,7 @@ import {
 import type { SamSong } from "../../lib/bridge";
 import { writeEventLog } from "../../lib/bridge7";
 import { VUMeter } from "../deck/VUMeter";
+import { parseSongDragPayload } from "../../lib/songDrag";
 
 interface SourceChannel {
     id: DeckId;
@@ -186,8 +187,8 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
                 setIsDragOver(false);
                 const raw = e.dataTransfer.getData("text/plain");
                 if (!raw) return;
-                let song: SamSong;
-                try { song = JSON.parse(raw); } catch { return; }
+                const song = parseSongDragPayload(raw) as SamSong | null;
+                if (!song) return;
                 try {
                     await loadTrack(ch.id, song.filename, song.id);
                     setLoadError(null);
@@ -291,7 +292,7 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
             <input
                 type="range"
                 min={0}
-                max={1}
+                max={1.5}
                 step={0.01}
                 value={volume}
                 onChange={handleVolumeChange}
@@ -303,6 +304,7 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
             >
                 {Math.round(volume * 100)}%
             </span>
+            <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset volume" onClick={() => { setVolume(1); setChannelGain(ch.id, 1).catch(console.error); }}>↺</button>
 
             {/* Pitch + Tempo */}
             <div style={{ display: "flex", flexDirection: "column", gap: 2, width: 110, marginLeft: 2 }}>
@@ -317,6 +319,7 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
                         onChange={handlePitchChange}
                         style={{ flex: 1, accentColor: ch.color, height: 2 }}
                     />
+                    <button className="btn btn-ghost btn-icon" style={{ width: 14, height: 14 }} title="Reset pitch" onClick={() => { setPitchPct(0); setDeckPitch(ch.id, 0).catch(console.error); }}>↺</button>
                 </div>
                 <div className="flex items-center gap-1">
                     <span className="mono text-muted" style={{ fontSize: 8, minWidth: 16 }}>T</span>
@@ -329,6 +332,7 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
                         onChange={handleTempoChange}
                         style={{ flex: 1, accentColor: ch.color, height: 2 }}
                     />
+                    <button className="btn btn-ghost btn-icon" style={{ width: 14, height: 14 }} title="Reset tempo" onClick={() => { setTempoPct(0); setDeckTempo(ch.id, 0).catch(console.error); }}>↺</button>
                 </div>
             </div>
 

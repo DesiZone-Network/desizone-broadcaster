@@ -9,6 +9,7 @@ import {
     getSamCategories,
     getSongsInCategory,
     getSamDbStatus,
+    createSamCategory,
     addToQueue,
     getSongsByWeightRange,
     getSongTypes,
@@ -17,6 +18,7 @@ import {
     onDeckStateChanged,
 } from "../../lib/bridge";
 import type { SamSong, SamCategory } from "../../lib/bridge";
+import { serializeSongDragPayload } from "../../lib/songDrag";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -97,6 +99,26 @@ function byCategoryOrder(a: SamCategory, b: SamCategory): number {
     return a.catname.localeCompare(b.catname);
 }
 
+function extractSpotifyTrackId(value: string): string | null {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const direct = trimmed.match(/^[A-Za-z0-9]{22}$/);
+    if (direct) return direct[0];
+    const trackUrl = trimmed.match(/track\/([A-Za-z0-9]{22})/);
+    if (trackUrl) return trackUrl[1];
+    return null;
+}
+
+function parseXfadeOverride(raw: string): Record<string, number> {
+    const out: Record<string, number> = {};
+    const params = new URLSearchParams(raw.startsWith("&") ? raw.slice(1) : raw);
+    for (const [k, v] of params.entries()) {
+        const n = Number(v);
+        if (Number.isFinite(n)) out[k] = n;
+    }
+    return out;
+}
+
 function buildCategoryRows(categories: SamCategory[]): CategoryRow[] {
     if (categories.length === 0) return [];
 
@@ -170,7 +192,7 @@ function SongRow({
             onDragStart={(e) => {
                 // Use text/plain — WebKit (Tauri macOS) silently drops
                 // custom MIME types like "application/desizone-song"
-                e.dataTransfer.setData("text/plain", JSON.stringify(song));
+                e.dataTransfer.setData("text/plain", serializeSongDragPayload(song, "library"));
                 e.dataTransfer.effectAllowed = "copy";
             }}
         >
@@ -340,6 +362,8 @@ function EditSongDialog({
     const [rating,    setRating]    = useState(String(song.rating ?? ""));
     const [label,     setLabel]     = useState(song.label ?? "");
     const [isrc,      setIsrc]      = useState(song.isrc ?? "");
+    const [spotifyId, setSpotifyId] = useState(song.upc ?? "");
+    const [xfade,     setXfade]     = useState(song.xfade ?? "");
     const [overlay,   setOverlay]   = useState(song.overlay === "yes" ? "yes" : "no");
 
     // Field style helper
@@ -353,6 +377,14 @@ function EditSongDialog({
         color: "var(--text-primary)",
         outline: "none",
     };
+
+    const spotifyTrackId = extractSpotifyTrackId(spotifyId);
+    const parsedXfade = parseXfadeOverride(xfade);
+    const albumArtSrc = song.picture
+        ? (song.picture.startsWith("data:") || song.picture.startsWith("http")
+            ? song.picture
+            : `file://${song.picture.replace(/\\/g, "/")}`)
+        : null;
 
     const handleSave = async () => {
         setSaving(true);
@@ -368,6 +400,8 @@ function EditSongDialog({
             if (mood      !== (song.mood      ?? "")) fields.mood      = mood;
             if (label     !== (song.label     ?? "")) fields.label     = label;
             if (isrc      !== (song.isrc      ?? "")) fields.isrc      = isrc;
+            if (spotifyId !== (song.upc       ?? "")) fields.upc       = spotifyId;
+            if (xfade     !== (song.xfade     ?? "")) fields.xfade     = xfade;
             // Numeric
             const wNum = parseFloat(weight);
             if (!isNaN(wNum) && wNum !== (song.weight ?? 50)) fields.weight = wNum;
@@ -435,6 +469,24 @@ function EditSongDialog({
                 </div>
 
                 {/* Fields */}
+                {(albumArtSrc || song.picture) && (
+                    <FieldRow label="Album Art">
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            {albumArtSrc ? (
+                                <img
+                                    src={albumArtSrc}
+                                    alt="Album art"
+                                    style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border-strong)" }}
+                                />
+                            ) : (
+                                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Album art exists in metadata but could not be previewed.</div>
+                            )}
+                            <div className="mono" style={{ fontSize: 10, color: "var(--text-muted)", wordBreak: "break-all" }}>
+                                {song.picture}
+                            </div>
+                        </div>
+                    </FieldRow>
+                )}
                 <FieldRow label="Title">
                     <input style={inp} value={title} onChange={e => setTitle(e.target.value)} />
                 </FieldRow>
@@ -513,6 +565,34 @@ function EditSongDialog({
                 </FieldRow>
                 <FieldRow label="ISRC">
                     <input style={inp} value={isrc} onChange={e => setIsrc(e.target.value)} maxLength={12} />
+                </FieldRow>
+                <FieldRow label="Spotify ID">
+                    <div>
+                        <input style={inp} value={spotifyId} onChange={e => setSpotifyId(e.target.value)} placeholder="Track ID or Spotify track URL" />
+                        {spotifyTrackId && (
+                            <iframe
+                                data-testid="embed-iframe"
+                                style={{ borderRadius: 12, marginTop: 8, width: "100%" }}
+                                src={`https://open.spotify.com/embed/track/${spotifyTrackId}?utm_source=generator`}
+                                width="100%"
+                                height="152"
+                                frameBorder="0"
+                                allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+                                loading="lazy"
+                                title="Spotify track preview"
+                            />
+                        )}
+                    </div>
+                </FieldRow>
+                <FieldRow label="Per-song Fade">
+                    <div>
+                        <input style={inp} value={xfade} onChange={e => setXfade(e.target.value)} placeholder="&fie=0&foe=0&xf=2&ge=0&gl=29" />
+                        <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+                            Parsed: {Object.keys(parsedXfade).length === 0
+                                ? "No key/value fade overrides found"
+                                : Object.entries(parsedXfade).map(([k, v]) => `${k}=${v}`).join(" · ")}
+                        </div>
+                    </div>
                 </FieldRow>
 
                 {/* Filename (read-only) */}
@@ -699,6 +779,7 @@ export function LibraryPanel() {
     // Track deck_a idle so double-click can route to the free deck
     const [deckAIdle, setDeckAIdle] = useState(true);
     const [loadMsg, setLoadMsg] = useState<string | null>(null);
+    const [creatingFolder, setCreatingFolder] = useState(false);
     const loadMsgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
@@ -825,6 +906,26 @@ export function LibraryPanel() {
         }
     };
 
+    const handleCreateFolder = async () => {
+        if (creatingFolder) return;
+        const name = window.prompt("New folder name");
+        if (!name || !name.trim()) return;
+
+        const parentId = filter.kind === "category" ? filter.id : 0;
+        setCreatingFolder(true);
+        try {
+            const created = await createSamCategory(name.trim(), parentId);
+            const updated = await getSamCategories();
+            setCategories(updated);
+            applyFilter({ kind: "category", id: created.id, name: created.catname });
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setError(msg);
+        } finally {
+            setCreatingFolder(false);
+        }
+    };
+
     const applyFilter = (f: LibraryFilter) => {
         setFilter(f);
         setSelected(null);
@@ -940,11 +1041,22 @@ export function LibraryPanel() {
                     ))}
 
                     {/* ── Folders ── */}
-                    <SectionLabel
-                        label="Folders"
-                        collapsed={foldersCollapsed}
-                        onToggle={() => setFoldersCollapsed((v) => !v)}
-                    />
+                    <div className="flex items-center justify-between" style={{ paddingRight: 6 }}>
+                        <SectionLabel
+                            label="Folders"
+                            collapsed={foldersCollapsed}
+                            onToggle={() => setFoldersCollapsed((v) => !v)}
+                        />
+                        <button
+                            className="btn btn-ghost btn-icon"
+                            style={{ width: 18, height: 18, marginTop: 5, opacity: creatingFolder ? 0.5 : 0.9 }}
+                            onClick={handleCreateFolder}
+                            title="Create folder"
+                            disabled={creatingFolder}
+                        >
+                            <Plus size={11} />
+                        </button>
+                    </div>
                     {!foldersCollapsed && categoryRows.map(({ category: cat, depth }) => (
                         <SidebarItem
                             key={cat.id}
