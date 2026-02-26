@@ -1,7 +1,9 @@
 use tauri::State;
 
 use crate::{
-    audio::dsp::{agc::AgcConfig, eq::EqConfig, pipeline::PipelineSettings},
+    audio::dsp::{
+        agc::AgcConfig, eq::EqConfig, pipeline::PipelineSettings, stem_filter::StemFilterMode,
+    },
     state::AppState,
 };
 
@@ -77,6 +79,22 @@ pub async fn set_pipeline_settings(
     apply_and_persist(target, settings, &channel, &state).await
 }
 
+#[tauri::command]
+pub async fn set_channel_stem_filter(
+    channel: String,
+    mode: StemFilterMode,
+    amount: Option<f32>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target = parse_channel_target(&channel)?;
+    let mut settings = get_pipeline_settings(&channel, &state).await?;
+    settings.stem_filter.mode = mode;
+    if let Some(v) = amount {
+        settings.stem_filter.amount = v.clamp(0.0, 1.0);
+    }
+    apply_and_persist(target, settings, &channel, &state).await
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async fn get_pipeline_settings(
@@ -96,7 +114,24 @@ async fn get_pipeline_settings(
             return Ok(row_to_settings(&row));
         }
     }
-    Ok(PipelineSettings::default())
+    Ok(default_pipeline_for_channel(channel))
+}
+
+fn default_pipeline_for_channel(channel: &str) -> PipelineSettings {
+    let mut settings = PipelineSettings::default();
+    match channel {
+        "deck_a" | "deck_b" => {
+            settings.stem_filter.amount = 0.82;
+        }
+        "voice_fx" => {
+            settings.stem_filter.amount = 0.55;
+        }
+        "sound_fx" | "aux_1" | "aux_2" | "master" => {
+            settings.stem_filter.amount = 0.70;
+        }
+        _ => {}
+    }
+    settings
 }
 
 async fn apply_and_persist(

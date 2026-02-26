@@ -887,11 +887,11 @@ canvas.vu-canvas {
 .deck-panel {
     display: flex;
     flex-direction: column;
-    gap: var(--sp-2);
+    gap: 5px;
     background: var(--bg-panel);
     border: 1px solid var(--border-default);
     border-radius: var(--r-lg);
-    padding: var(--sp-3);
+    padding: 10px;
     min-width: 0;
 }
 

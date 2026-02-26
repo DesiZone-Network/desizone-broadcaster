@@ -69,10 +69,49 @@ const DEFAULT_PIPELINE: PipelineSettings = {
         enabled: true,
         ceiling_db: -0.1,
     },
+    stem_filter: {
+        mode: "off",
+        amount: 0.85,
+    },
 };
 
 function copyPipeline(p: PipelineSettings): PipelineSettings {
     return JSON.parse(JSON.stringify(p));
+}
+
+function defaultPipelineForChannel(channel: DeckId | "master"): PipelineSettings {
+    const base = copyPipeline(DEFAULT_PIPELINE);
+    if (channel === "deck_a" || channel === "deck_b") {
+        base.stem_filter.amount = 0.82;
+    } else if (channel === "voice_fx") {
+        base.stem_filter.amount = 0.55;
+    } else {
+        base.stem_filter.amount = 0.70;
+    }
+    return base;
+}
+
+function normalizePipeline(p: PipelineSettings): PipelineSettings {
+    const base = copyPipeline(DEFAULT_PIPELINE);
+    return {
+        ...base,
+        ...p,
+        eq: { ...base.eq, ...p.eq },
+        agc: { ...base.agc, ...p.agc },
+        multiband: {
+            ...base.multiband,
+            ...p.multiband,
+            bands: p.multiband?.bands?.length ? p.multiband.bands : base.multiband.bands,
+        },
+        dual_band: {
+            ...base.dual_band,
+            ...p.dual_band,
+            lf_band: { ...base.dual_band.lf_band, ...p.dual_band?.lf_band },
+            hf_band: { ...base.dual_band.hf_band, ...p.dual_band?.hf_band },
+        },
+        clipper: { ...base.clipper, ...p.clipper },
+        stem_filter: { ...base.stem_filter, ...p.stem_filter },
+    };
 }
 
 function applyBandToAll(
@@ -88,8 +127,8 @@ function applyBandToAll(
     return next;
 }
 
-function legacyFallbackToPipeline(row: any): PipelineSettings {
-    const p = copyPipeline(DEFAULT_PIPELINE);
+function legacyFallbackToPipeline(row: any, channel: DeckId | "master"): PipelineSettings {
+    const p = defaultPipelineForChannel(channel);
     p.eq.low_gain_db = row.eq_low_gain_db ?? p.eq.low_gain_db;
     p.eq.low_freq_hz = row.eq_low_freq_hz ?? p.eq.low_freq_hz;
     p.eq.mid_gain_db = row.eq_mid_gain_db ?? p.eq.mid_gain_db;
@@ -178,31 +217,57 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 }
 
 export function ChannelDspDialog({ channel, channelLabel, trigger }: Props) {
-    const [settings, setSettings] = useState<PipelineSettings>(copyPipeline(DEFAULT_PIPELINE));
+    const [settings, setSettings] = useState<PipelineSettings>(defaultPipelineForChannel(channel));
     const [open, setOpen] = useState(false);
     const [saving, setSaving] = useState(false);
+
+    const applyStemPreset = (preset: "off" | "vocal_boost" | "karaoke" | "light_isolation") => {
+        setSettings((prev) => {
+            const next = copyPipeline(prev);
+            switch (preset) {
+                case "off":
+                    next.stem_filter.mode = "off";
+                    break;
+                case "vocal_boost":
+                    next.stem_filter.mode = "vocal";
+                    next.stem_filter.amount = 0.72;
+                    break;
+                case "karaoke":
+                    next.stem_filter.mode = "instrumental";
+                    next.stem_filter.amount = 0.90;
+                    break;
+                case "light_isolation":
+                    next.stem_filter.mode = "instrumental";
+                    next.stem_filter.amount = 0.55;
+                    break;
+                default:
+                    break;
+            }
+            return next;
+        });
+    };
 
     useEffect(() => {
         if (!open) return;
         getChannelDsp(channel)
             .then((row) => {
                 if (!row) {
-                    setSettings(copyPipeline(DEFAULT_PIPELINE));
+                    setSettings(defaultPipelineForChannel(channel));
                     return;
                 }
                 if (row.pipeline_settings_json) {
                     try {
                         const parsed = JSON.parse(row.pipeline_settings_json) as PipelineSettings;
-                        setSettings(parsed);
+                        setSettings(normalizePipeline(parsed));
                         return;
                     } catch {
                         // Fall through to legacy hydration.
                     }
                 }
-                setSettings(legacyFallbackToPipeline(row));
+                setSettings(legacyFallbackToPipeline(row, channel));
             })
             .catch(() => {
-                setSettings(copyPipeline(DEFAULT_PIPELINE));
+                setSettings(defaultPipelineForChannel(channel));
             });
     }, [open, channel]);
 
@@ -352,6 +417,64 @@ export function ChannelDspDialog({ channel, channelLabel, trigger }: Props) {
                                 label="Enable clipper"
                             />
                             <NumberSlider label="Ceiling" value={settings.clipper.ceiling_db} min={-6} max={0} step={0.1} unit="dB" disabled={!settings.clipper.enabled} onChange={(v) => setSettings((s) => ({ ...s, clipper: { ...s.clipper, ceiling_db: v } }))} />
+
+                            <div className="separator" />
+
+                            <div className="flex items-center gap-2" style={{ marginTop: 6 }}>
+                                <span className="form-label">Vocal / Instrument Filter</span>
+                                {(
+                                    [
+                                        { value: "off", label: "OFF" },
+                                        { value: "vocal", label: "VOCAL" },
+                                        { value: "instrumental", label: "INSTR" },
+                                    ] as const
+                                ).map((m) => (
+                                    <button
+                                        key={m.value}
+                                        className="btn btn-ghost"
+                                        style={{
+                                            fontSize: 10,
+                                            padding: "3px 8px",
+                                            background: settings.stem_filter.mode === m.value ? "var(--amber-glow)" : "transparent",
+                                            borderColor: settings.stem_filter.mode === m.value ? "var(--amber-dim)" : "var(--border-default)",
+                                            color: settings.stem_filter.mode === m.value ? "var(--amber)" : "var(--text-muted)",
+                                        }}
+                                        onClick={() => setSettings((s) => ({ ...s, stem_filter: { ...s.stem_filter, mode: m.value } }))}
+                                    >
+                                        {m.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="flex items-center gap-2" style={{ marginTop: 6, flexWrap: "wrap" }}>
+                                <span className="form-label">Presets</span>
+                                {(
+                                    [
+                                        { key: "vocal_boost", label: "Vocal Boost" },
+                                        { key: "karaoke", label: "Karaoke" },
+                                        { key: "light_isolation", label: "Light Isolation" },
+                                        { key: "off", label: "Filter Off" },
+                                    ] as const
+                                ).map((p) => (
+                                    <button
+                                        key={p.key}
+                                        className="btn btn-ghost"
+                                        style={{ fontSize: 10, padding: "3px 8px" }}
+                                        onClick={() => applyStemPreset(p.key)}
+                                    >
+                                        {p.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <NumberSlider
+                                label="Filter Amount"
+                                value={Math.round((settings.stem_filter.amount ?? 0) * 100)}
+                                min={0}
+                                max={100}
+                                step={1}
+                                unit="%"
+                                disabled={settings.stem_filter.mode === "off"}
+                                onChange={(v) => setSettings((s) => ({ ...s, stem_filter: { ...s.stem_filter, amount: Math.max(0, Math.min(1, v / 100)) } }))}
+                            />
                         </Tabs.Content>
                     </Tabs.Root>
 

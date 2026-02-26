@@ -12,13 +12,17 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "DesiZone Broadcaster",
         "width": 1280,
         "height": 800,
         "minWidth": 1024,
         "minHeight": 600,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "visible": true,
+        "focus": true,
+        "center": true
       }
     ],
     "security": {

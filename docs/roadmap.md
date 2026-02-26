@@ -89,6 +89,18 @@ Phase 5 can begin in parallel with Phase 4.
 
 ---
 
+## Post-Phase Backlog
+
+| Feature | Priority | Status |
+|---------|----------|--------|
+| True independent **Tempo** and **Pitch** (time-stretch + key lock, not shared rate slider) | High | 🟡 Planned |
+
+Notes:
+- Current engine exposes separate controls but both map to playback-rate, so they are intentionally unified in UI for now.
+- Planned implementation is a dedicated time-stretch/pitch-shift DSP stage so tempo can change without changing musical key.
+
+---
+
 ## Key Architecture Decisions
 
 | Decision | Choice | Rationale |

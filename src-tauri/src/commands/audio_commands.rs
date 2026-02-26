@@ -57,6 +57,20 @@ pub async fn pause_deck(deck: String, state: State<'_, AppState>) -> Result<(), 
 }
 
 #[tauri::command]
+pub async fn stop_deck(deck: String, state: State<'_, AppState>) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    let mut engine = state.engine.lock().unwrap();
+    let _ = engine.pause(deck_id);
+    engine.seek(deck_id, 0)
+}
+
+#[tauri::command]
+pub async fn next_deck(deck: String, state: State<'_, AppState>) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state.engine.lock().unwrap().stop_with_completion(deck_id)
+}
+
+#[tauri::command]
 pub async fn seek_deck(
     deck: String,
     position_ms: u64,
@@ -102,6 +116,27 @@ pub async fn set_deck_tempo(
         .lock()
         .unwrap()
         .set_deck_tempo(deck_id, tempo_pct)
+}
+
+#[tauri::command]
+pub async fn set_deck_loop(
+    deck: String,
+    start_ms: u64,
+    end_ms: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_deck_loop(deck_id, start_ms, end_ms)
+}
+
+#[tauri::command]
+pub async fn clear_deck_loop(deck: String, state: State<'_, AppState>) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state.engine.lock().unwrap().clear_deck_loop(deck_id)
 }
 
 #[tauri::command]

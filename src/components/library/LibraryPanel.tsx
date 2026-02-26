@@ -65,6 +65,29 @@ interface CategoryRow {
     depth: number;
 }
 
+interface PersistedLibraryState {
+    filter?: LibraryFilter;
+    query?: string;
+    searchOpts?: SearchOpts;
+    typeFilter?: string;
+    typesCollapsed?: boolean;
+    rotationCollapsed?: boolean;
+    foldersCollapsed?: boolean;
+}
+
+const LIBRARY_STATE_KEY = "desizone.library.panel.v1";
+
+function readPersistedLibraryState(): PersistedLibraryState {
+    try {
+        const raw = window.localStorage.getItem(LIBRARY_STATE_KEY);
+        if (!raw) return {};
+        const parsed = JSON.parse(raw) as PersistedLibraryState;
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function formatDuration(secs: number): string {
@@ -229,6 +252,13 @@ function SongRow({
                     {song.artist || "Unknown Artist"}
                 </div>
             </div>
+
+            <span
+                className="mono text-muted"
+                style={{ fontSize: 10, minWidth: 34, textAlign: "right" }}
+            >
+                {song.bpm > 0 ? song.bpm : "--"}
+            </span>
 
             <span
                 className="mono text-muted"
@@ -740,6 +770,7 @@ function SectionLabel({
 // ── LibraryPanel ──────────────────────────────────────────────────────────
 
 export function LibraryPanel() {
+    const [persistedState] = useState<PersistedLibraryState>(() => readPersistedLibraryState());
     const [connected, setConnected]         = useState(false);
 
     // sidebar data
@@ -748,12 +779,40 @@ export function LibraryPanel() {
     const categoryRows = useMemo(() => buildCategoryRows(categories), [categories]);
 
     // sidebar section collapse
-    const [typesCollapsed,    setTypesCollapsed]    = useState(false);
-    const [rotationCollapsed, setRotationCollapsed] = useState(false);
-    const [foldersCollapsed,  setFoldersCollapsed]  = useState(false);
+    const [typesCollapsed,    setTypesCollapsed]    = useState(!!persistedState.typesCollapsed);
+    const [rotationCollapsed, setRotationCollapsed] = useState(!!persistedState.rotationCollapsed);
+    const [foldersCollapsed,  setFoldersCollapsed]  = useState(!!persistedState.foldersCollapsed);
 
     // active filter (discriminated union)
-    const [filter, setFilter] = useState<LibraryFilter>({ kind: "all" });
+    const [filter, setFilter] = useState<LibraryFilter>(() => {
+        const candidate = persistedState.filter;
+        if (!candidate || typeof candidate !== "object") return { kind: "all" };
+        switch (candidate.kind) {
+            case "all":
+                return { kind: "all" };
+            case "songtype":
+                return typeof candidate.value === "string"
+                    ? { kind: "songtype", value: candidate.value }
+                    : { kind: "all" };
+            case "rotation":
+                return (typeof candidate.min === "number" &&
+                    typeof candidate.max === "number" &&
+                    typeof candidate.label === "string")
+                    ? {
+                        kind: "rotation",
+                        min: candidate.min,
+                        max: candidate.max,
+                        label: candidate.label,
+                    }
+                    : { kind: "all" };
+            case "category":
+                return (typeof candidate.id === "number" && typeof candidate.name === "string")
+                    ? { kind: "category", id: candidate.id, name: candidate.name }
+                    : { kind: "all" };
+            default:
+                return { kind: "all" };
+        }
+    });
 
     // song list
     const [songs,    setSongs]   = useState<SamSong[]>([]);
@@ -765,13 +824,16 @@ export function LibraryPanel() {
     const [editSong, setEditSong] = useState<SamSong | null>(null);
 
     // search
-    const [query, setQuery]         = useState("");
+    const [query, setQuery]         = useState(persistedState.query ?? "");
     const [showOpts, setShowOpts]   = useState(false);
-    const [searchOpts, setSearchOpts] = useState<SearchOpts>({
-        artist: true, title: true, album: false, filename: false,
-    });
+    const [searchOpts, setSearchOpts] = useState<SearchOpts>(() => ({
+        artist: persistedState.searchOpts?.artist ?? true,
+        title: persistedState.searchOpts?.title ?? true,
+        album: persistedState.searchOpts?.album ?? false,
+        filename: persistedState.searchOpts?.filename ?? false,
+    }));
     // type filter from advanced options dropdown (only applies when filter.kind === "all")
-    const [typeFilter, setTypeFilter] = useState<string>("");
+    const [typeFilter, setTypeFilter] = useState<string>(persistedState.typeFilter ?? "");
 
     const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -835,7 +897,6 @@ export function LibraryPanel() {
             setCategories([]);
             setSongTypes([]);
             setSongs([]);
-            setFilter({ kind: "all" });
             return;
         }
         getSamCategories()
@@ -845,6 +906,39 @@ export function LibraryPanel() {
             .then(setSongTypes)
             .catch(() => setSongTypes([]));
     }, [connected]);
+
+    useEffect(() => {
+        // If a previously saved category no longer exists, fall back cleanly.
+        if (filter.kind === "category" && categories.length > 0) {
+            const exists = categories.some((cat) => cat.id === filter.id);
+            if (!exists) setFilter({ kind: "all" });
+        }
+    }, [filter, categories]);
+
+    useEffect(() => {
+        try {
+            const stateToPersist: PersistedLibraryState = {
+                filter,
+                query,
+                searchOpts,
+                typeFilter,
+                typesCollapsed,
+                rotationCollapsed,
+                foldersCollapsed,
+            };
+            window.localStorage.setItem(LIBRARY_STATE_KEY, JSON.stringify(stateToPersist));
+        } catch {
+            // Ignore storage quota/privacy errors.
+        }
+    }, [
+        filter,
+        query,
+        searchOpts,
+        typeFilter,
+        typesCollapsed,
+        rotationCollapsed,
+        foldersCollapsed,
+    ]);
 
     // ── Unified fetchSongs ────────────────────────────────────────────────
 
@@ -1198,6 +1292,7 @@ export function LibraryPanel() {
                     <span style={{ width: 11 }} />
                     <span className="section-label" style={{ flex: 2 }}>Title</span>
                     <span className="section-label" style={{ flex: 1.5 }}>Artist</span>
+                    <span className="section-label" style={{ minWidth: 34, textAlign: "right" }}>BPM</span>
                     <span className="section-label" style={{ minWidth: 36, textAlign: "right" }}>Dur</span>
                     <span style={{ width: 26 }} />
                 </div>

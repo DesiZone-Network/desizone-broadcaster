@@ -3,7 +3,9 @@ import { ArrowRightLeft, MoveHorizontal, Settings2 } from "lucide-react";
 import {
     onCrossfadeProgress,
     CrossfadeProgressEvent,
+    getChannelDsp,
     setManualCrossfade,
+    setChannelEq,
     triggerManualFade,
 } from "../../lib/bridge";
 import { CrossfadeSettingsDialog } from "./CrossfadeSettingsDialog";
@@ -82,6 +84,9 @@ export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
     const [manualPos, setManualPos] = useState(-1);
     const [progress, setProgress] = useState<CrossfadeProgressEvent | null>(null);
     const [fadeMs, setFadeMs] = useState(8000);
+    const [eqA, setEqA] = useState({ high: 0, mid: 0, low: 0 });
+    const [eqB, setEqB] = useState({ high: 0, mid: 0, low: 0 });
+    const eqTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         const unsub = onCrossfadeProgress((e) => {
@@ -97,6 +102,26 @@ export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
             unsub.then((f) => f());
         };
     }, []);
+
+    useEffect(() => {
+        Promise.all([getChannelDsp("deck_a"), getChannelDsp("deck_b")])
+            .then(([a, b]) => {
+                if (a) setEqA({ high: a.eq_high_gain_db ?? 0, mid: a.eq_mid_gain_db ?? 0, low: a.eq_low_gain_db ?? 0 });
+                if (b) setEqB({ high: b.eq_high_gain_db ?? 0, mid: b.eq_mid_gain_db ?? 0, low: b.eq_low_gain_db ?? 0 });
+            })
+            .catch(() => {});
+    }, []);
+
+    useEffect(() => {
+        if (eqTimerRef.current) clearTimeout(eqTimerRef.current);
+        eqTimerRef.current = setTimeout(() => {
+            setChannelEq("deck_a", eqA.low, eqA.mid, eqA.high).catch(console.error);
+            setChannelEq("deck_b", eqB.low, eqB.mid, eqB.high).catch(console.error);
+        }, 120);
+        return () => {
+            if (eqTimerRef.current) clearTimeout(eqTimerRef.current);
+        };
+    }, [eqA, eqB]);
 
     const applyManual = (value: number) => {
         const clamped = Math.max(-1, Math.min(1, value));
@@ -210,6 +235,61 @@ export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
                     <ArrowRightLeft size={11} />
                     Force Crossfade
                 </button>
+            </div>
+
+            <div
+                style={{
+                    border: "1px solid var(--border-strong)",
+                    borderRadius: "var(--r-md)",
+                    background: "var(--bg-input)",
+                    padding: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                }}
+            >
+                <div className="section-label">Deck EQ</div>
+                {[
+                    { id: "a", label: "A", color: "var(--amber)" as const, eq: eqA, setEq: setEqA },
+                    { id: "b", label: "B", color: "var(--cyan)" as const, eq: eqB, setEq: setEqB },
+                ].map((deck) => (
+                    <div key={deck.id} style={{ display: "grid", gridTemplateColumns: "14px 1fr 1fr 1fr", gap: 6, alignItems: "center" }}>
+                        <span className="mono" style={{ fontSize: 10, color: deck.color }}>{deck.label}</span>
+                        <input
+                            type="range"
+                            min={-12}
+                            max={12}
+                            step={0.5}
+                            value={deck.eq.high}
+                            onChange={(e) => deck.setEq((prev) => ({ ...prev, high: parseFloat(e.target.value) }))}
+                            title={`${deck.label} high`}
+                            style={{ width: "100%", accentColor: deck.color, height: 4 }}
+                        />
+                        <input
+                            type="range"
+                            min={-12}
+                            max={12}
+                            step={0.5}
+                            value={deck.eq.mid}
+                            onChange={(e) => deck.setEq((prev) => ({ ...prev, mid: parseFloat(e.target.value) }))}
+                            title={`${deck.label} mid`}
+                            style={{ width: "100%", accentColor: deck.color, height: 4 }}
+                        />
+                        <input
+                            type="range"
+                            min={-12}
+                            max={12}
+                            step={0.5}
+                            value={deck.eq.low}
+                            onChange={(e) => deck.setEq((prev) => ({ ...prev, low: parseFloat(e.target.value) }))}
+                            title={`${deck.label} low`}
+                            style={{ width: "100%", accentColor: deck.color, height: 4 }}
+                        />
+                    </div>
+                ))}
+                <div className="mono text-muted" style={{ fontSize: 9, textAlign: "center" }}>
+                    HIGH • MID • LOW
+                </div>
             </div>
 
             {progress && (

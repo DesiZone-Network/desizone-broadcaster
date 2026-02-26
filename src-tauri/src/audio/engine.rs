@@ -11,10 +11,15 @@ use cpal::{
 use ringbuf::{traits::Split, HeapRb};
 use serde::{Deserialize, Serialize};
 
+use crate::db::local::MonitorRoutingConfig;
+
 use super::{
     crossfade::{CrossfadeConfig, CrossfadeState, CrossfadeTriggerMode, DeckId},
     deck::{AttachOp, Deck, DeckState, PreparedTrack, TrackCompletion},
-    dsp::pipeline::{ChannelPipeline, PipelineSettings},
+    dsp::{
+        pipeline::{ChannelPipeline, PipelineSettings},
+        stem_filter::{StemFilterConfig, StemFilterMode},
+    },
     mixer::Mixer,
 };
 
@@ -47,6 +52,7 @@ pub struct DeckStateEvent {
     pub tempo_pct: f32,
     pub decoder_buffer_ms: u64,
     pub rms_db_pre_fader: f32,
+    pub cue_preview_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +81,10 @@ struct RtState {
     crossfade: CrossfadeState,
     crossfade_config: CrossfadeConfig,
     manual_crossfade_pos: f32,
+    cue_preview_enabled: HashMap<DeckId, bool>,
+    cue_split_active: bool,
+    cue_level: f32,
+    master_level: f32,
     sample_rate: u32,
     // Per-channel scratch buffers (avoid alloc in callback)
     buf_deck_a: Vec<f32>,
@@ -83,6 +93,7 @@ struct RtState {
     buf_aux1: Vec<f32>,
     buf_aux2: Vec<f32>,
     buf_voice_fx: Vec<f32>,
+    buf_silence: Vec<f32>,
     // Encoder ring buffer producer (to stream/icecast thread)
     encoder_prod: ringbuf::HeapProd<f32>,
 }
@@ -110,6 +121,12 @@ enum EngineCmd {
         deck: DeckId,
         pct: f32,
     },
+    SetDeckLoop {
+        deck: DeckId,
+        start_ms: u64,
+        end_ms: u64,
+    },
+    ClearDeckLoop(DeckId),
     StartCrossfade {
         outgoing: DeckId,
         incoming: DeckId,
@@ -129,6 +146,11 @@ enum EngineCmd {
     SetMasterPipeline {
         settings: PipelineSettings,
     },
+    SetDeckCuePreview {
+        deck: DeckId,
+        enabled: bool,
+    },
+    SetMonitorRoutingConfig(MonitorRoutingConfig),
 }
 
 /// The main audio engine — lives behind `Arc<Mutex<AudioEngine>>` in `AppState`.
@@ -200,7 +222,24 @@ impl AudioEngine {
                     DeckId::Aux2,
                     DeckId::VoiceFx,
                 ] {
-                    m.insert(id, ChannelPipeline::new(sample_rate as f32));
+                    let mut pipeline = ChannelPipeline::new(sample_rate as f32);
+                    // Tuned defaults per channel type (mode remains OFF).
+                    match id {
+                        DeckId::DeckA | DeckId::DeckB => {
+                            pipeline.stem_filter.set_config(StemFilterConfig {
+                                mode: StemFilterMode::Off,
+                                amount: 0.82,
+                            });
+                        }
+                        DeckId::VoiceFx => {
+                            pipeline.stem_filter.set_config(StemFilterConfig {
+                                mode: StemFilterMode::Off,
+                                amount: 0.55,
+                            });
+                        }
+                        _ => {}
+                    }
+                    m.insert(id, pipeline);
                 }
                 m
             },
@@ -209,6 +248,15 @@ impl AudioEngine {
             crossfade: CrossfadeState::default(),
             crossfade_config: CrossfadeConfig::default(),
             manual_crossfade_pos: -1.0,
+            cue_preview_enabled: {
+                let mut m = HashMap::new();
+                m.insert(DeckId::DeckA, false);
+                m.insert(DeckId::DeckB, false);
+                m
+            },
+            cue_split_active: false,
+            cue_level: 1.0,
+            master_level: 1.0,
             sample_rate,
             buf_deck_a: Vec::new(),
             buf_deck_b: Vec::new(),
@@ -216,6 +264,7 @@ impl AudioEngine {
             buf_aux1: Vec::new(),
             buf_aux2: Vec::new(),
             buf_voice_fx: Vec::new(),
+            buf_silence: Vec::new(),
             encoder_prod: enc_prod,
         }));
 
@@ -304,6 +353,51 @@ impl AudioEngine {
         })
     }
 
+    pub fn switch_deck_track_source(
+        &mut self,
+        deck: DeckId,
+        new_path: PathBuf,
+    ) -> Result<(), String> {
+        if !new_path.exists() {
+            return Err(format!("File not found: {}", new_path.display()));
+        }
+        if !new_path.is_file() {
+            return Err(format!("Path is not a file: {}", new_path.display()));
+        }
+
+        let (current_path, song_id, queue_id, from_rotation, declared_duration_ms, position_ms) = {
+            let rt = self.rt_state.lock().unwrap();
+            let d = rt.decks.get(&deck).ok_or("Unknown deck")?;
+            let current_path = d.file_path.clone().ok_or("No track loaded")?;
+            (
+                current_path,
+                d.song_id,
+                d.queue_id,
+                d.from_rotation,
+                d.declared_duration_ms,
+                d.position_ms(),
+            )
+        };
+
+        if current_path == new_path {
+            return Ok(());
+        }
+
+        let prepared = Deck::prepare_seek(
+            new_path,
+            song_id,
+            queue_id,
+            from_rotation,
+            declared_duration_ms,
+            position_ms,
+        )?;
+        self.send_cmd(EngineCmd::AttachPreparedTrack {
+            deck,
+            prepared,
+            op: AttachOp::Seek,
+        })
+    }
+
     pub fn set_channel_gain(&mut self, deck: DeckId, gain: f32) -> Result<(), String> {
         self.send_cmd(EngineCmd::SetGain { deck, gain })
     }
@@ -320,6 +414,23 @@ impl AudioEngine {
             deck,
             pct: tempo_pct,
         })
+    }
+
+    pub fn set_deck_loop(
+        &mut self,
+        deck: DeckId,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetDeckLoop {
+            deck,
+            start_ms,
+            end_ms,
+        })
+    }
+
+    pub fn clear_deck_loop(&mut self, deck: DeckId) -> Result<(), String> {
+        self.send_cmd(EngineCmd::ClearDeckLoop(deck))
     }
 
     pub fn start_crossfade(&mut self, outgoing: DeckId, incoming: DeckId) -> Result<(), String> {
@@ -357,6 +468,18 @@ impl AudioEngine {
         self.send_cmd(EngineCmd::SetMasterPipeline { settings })
     }
 
+    pub fn set_deck_cue_preview_enabled(
+        &mut self,
+        deck: DeckId,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetDeckCuePreview { deck, enabled })
+    }
+
+    pub fn set_monitor_routing_config(&mut self, config: MonitorRoutingConfig) {
+        let _ = self.send_cmd(EngineCmd::SetMonitorRoutingConfig(config));
+    }
+
     pub fn get_crossfade_config(&self) -> CrossfadeConfig {
         self.rt_state.lock().unwrap().crossfade_config.clone()
     }
@@ -378,6 +501,7 @@ impl AudioEngine {
             tempo_pct: d.tempo_pct,
             decoder_buffer_ms: d.decoder_buffered_ms(),
             rms_db_pre_fader: d.rms_db_pre_fader,
+            cue_preview_enabled: rt.cue_preview_enabled.get(&deck).copied().unwrap_or(false),
         })
     }
 
@@ -518,7 +642,9 @@ fn audio_callback(
         rt.buf_aux1.resize(len, 0.0);
         rt.buf_aux2.resize(len, 0.0);
         rt.buf_voice_fx.resize(len, 0.0);
+        rt.buf_silence.resize(len, 0.0);
     }
+    rt.buf_silence.fill(0.0);
 
     // ── Crossfade gain computation ──────────────────────────────────────
     let frames = (len / 2) as u64;
@@ -630,7 +756,7 @@ fn audio_callback(
     // ── Mix into master ──────────────────────────────────────────────────
     // SAFETY: we hold an exclusive &mut RtState from try_lock().
     // The buf_* fields and mixer.mix_into are disjoint fields; no aliasing.
-    let (a, b, sfx, aux1, aux2, vfx) = unsafe {
+    let (a, b, sfx, aux1, aux2, vfx, silence) = unsafe {
         (
             std::slice::from_raw_parts(rt.buf_deck_a.as_ptr(), rt.buf_deck_a.len()),
             std::slice::from_raw_parts(rt.buf_deck_b.as_ptr(), rt.buf_deck_b.len()),
@@ -638,9 +764,30 @@ fn audio_callback(
             std::slice::from_raw_parts(rt.buf_aux1.as_ptr(), rt.buf_aux1.len()),
             std::slice::from_raw_parts(rt.buf_aux2.as_ptr(), rt.buf_aux2.len()),
             std::slice::from_raw_parts(rt.buf_voice_fx.as_ptr(), rt.buf_voice_fx.len()),
+            std::slice::from_raw_parts(rt.buf_silence.as_ptr(), rt.buf_silence.len()),
         )
     };
-    rt.mixer.mix_into(output, a, b, sfx, aux1, aux2, vfx);
+    let cue_a = rt
+        .cue_preview_enabled
+        .get(&DeckId::DeckA)
+        .copied()
+        .unwrap_or(false)
+        && rt.cue_split_active;
+    let cue_b = rt
+        .cue_preview_enabled
+        .get(&DeckId::DeckB)
+        .copied()
+        .unwrap_or(false)
+        && rt.cue_split_active;
+    let a_mix = if cue_a { silence } else { a };
+    let b_mix = if cue_b { silence } else { b };
+    rt.mixer
+        .mix_into(output, a_mix, b_mix, sfx, aux1, aux2, vfx);
+    if (rt.master_level - 1.0).abs() > 1e-6 {
+        for s in output.iter_mut() {
+            *s *= rt.master_level;
+        }
+    }
 
     // ── Master DSP (limiter / output chain) ─────────────────────────────
     rt.master_pipeline.process(output);
@@ -721,6 +868,22 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
                     d.set_tempo_pct(pct);
                 }
             }
+            EngineCmd::SetDeckLoop {
+                deck,
+                start_ms,
+                end_ms,
+            } => {
+                if let Some(d) = rt.decks.get_mut(&deck) {
+                    if let Err(err) = d.set_loop_range_ms(start_ms, end_ms) {
+                        log::warn!("set_loop_range_ms failed for {deck}: {err}");
+                    }
+                }
+            }
+            EngineCmd::ClearDeckLoop(deck) => {
+                if let Some(d) = rt.decks.get_mut(&deck) {
+                    d.clear_loop();
+                }
+            }
             EngineCmd::StartCrossfade { outgoing, incoming } => {
                 if rt.crossfade.is_fading() {
                     continue;
@@ -784,6 +947,24 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
             EngineCmd::SetMasterPipeline { settings } => {
                 rt.master_pipeline =
                     ChannelPipeline::from_settings(rt.sample_rate as f32, settings);
+            }
+            EngineCmd::SetDeckCuePreview { deck, enabled } => {
+                if matches!(deck, DeckId::DeckA | DeckId::DeckB) {
+                    let effective = if rt.cue_split_active { enabled } else { false };
+                    rt.cue_preview_enabled.insert(deck, effective);
+                }
+            }
+            EngineCmd::SetMonitorRoutingConfig(config) => {
+                rt.cue_split_active = config
+                    .cue_device_id
+                    .as_ref()
+                    .is_some_and(|s| !s.trim().is_empty());
+                rt.cue_level = config.cue_level.clamp(0.0, 2.0);
+                rt.master_level = config.master_level.clamp(0.0, 2.0);
+                if !rt.cue_split_active {
+                    rt.cue_preview_enabled.insert(DeckId::DeckA, false);
+                    rt.cue_preview_enabled.insert(DeckId::DeckB, false);
+                }
             }
         }
     }

@@ -18,6 +18,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             song_id     INTEGER NOT NULL,
             name        TEXT    NOT NULL,
             position_ms INTEGER NOT NULL,
+            cue_kind    TEXT    NOT NULL DEFAULT 'memory',
+            slot        INTEGER,
+            label       TEXT    NOT NULL DEFAULT '',
+            color_hex   TEXT    NOT NULL DEFAULT '#f59e0b',
+            updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
             UNIQUE(song_id, name)
         );
 
@@ -158,6 +163,36 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             PRIMARY KEY (file_path, mtime_ms, resolution)
         );
 
+        CREATE TABLE IF NOT EXISTS beatgrid_analysis (
+            song_id        INTEGER PRIMARY KEY,
+            file_path      TEXT    NOT NULL,
+            mtime_ms       INTEGER NOT NULL,
+            bpm            REAL    NOT NULL,
+            first_beat_ms  INTEGER NOT NULL,
+            confidence     REAL    NOT NULL,
+            beat_times_json TEXT   NOT NULL,
+            updated_at     INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS stem_analysis (
+            song_id               INTEGER PRIMARY KEY,
+            source_file_path      TEXT    NOT NULL,
+            source_mtime_ms       INTEGER NOT NULL,
+            vocals_file_path      TEXT    NOT NULL,
+            instrumental_file_path TEXT   NOT NULL,
+            model_name            TEXT    NOT NULL,
+            updated_at            INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS monitor_routing_config (
+            id               INTEGER PRIMARY KEY DEFAULT 1,
+            master_device_id TEXT,
+            cue_device_id    TEXT,
+            cue_mix_mode     TEXT    NOT NULL DEFAULT 'split',
+            cue_level        REAL    NOT NULL DEFAULT 1.0,
+            master_level     REAL    NOT NULL DEFAULT 1.0
+        );
+
         -- Phase 6: Gateway connection settings
         CREATE TABLE IF NOT EXISTS gateway_config (
             id              INTEGER PRIMARY KEY DEFAULT 1,
@@ -266,11 +301,77 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let _ = sqlx::query("ALTER TABLE channel_dsp_settings ADD COLUMN pipeline_settings_json TEXT")
         .execute(pool)
         .await;
+    // Backward-compat migrations for cue_points schema expansion.
+    let _ =
+        sqlx::query("ALTER TABLE cue_points ADD COLUMN cue_kind TEXT NOT NULL DEFAULT 'memory'")
+            .execute(pool)
+            .await;
+    let _ = sqlx::query("ALTER TABLE cue_points ADD COLUMN slot INTEGER")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE cue_points ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await;
+    let _ =
+        sqlx::query("ALTER TABLE cue_points ADD COLUMN color_hex TEXT NOT NULL DEFAULT '#f59e0b'")
+            .execute(pool)
+            .await;
+    let _ = sqlx::query(
+        "ALTER TABLE cue_points ADD COLUMN updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_cue_points_song_kind_slot ON cue_points(song_id, cue_kind, slot) WHERE slot IS NOT NULL",
+    )
+    .execute(pool)
+    .await;
 
     Ok(())
 }
 
 // ── Cue points ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CueKind {
+    Hotcue,
+    Memory,
+    Transition,
+}
+
+impl CueKind {
+    fn from_db(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "hotcue" => Self::Hotcue,
+            "transition" => Self::Transition,
+            _ => Self::Memory,
+        }
+    }
+
+    fn as_db(self) -> &'static str {
+        match self {
+            Self::Hotcue => "hotcue",
+            Self::Memory => "memory",
+            Self::Transition => "transition",
+        }
+    }
+}
+
+impl Default for CueKind {
+    fn default() -> Self {
+        Self::Memory
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CueQuantize {
+    Off,
+    Beat1,
+    BeatHalf,
+    BeatQuarter,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CuePoint {
@@ -279,11 +380,27 @@ pub struct CuePoint {
     /// "start" | "end" | "intro" | "outro" | "fade" | "xfade" | "custom_0" … "custom_9"
     pub name: String,
     pub position_ms: i64,
+    pub cue_kind: CueKind,
+    pub slot: Option<i64>,
+    pub label: String,
+    pub color_hex: String,
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotCue {
+    pub song_id: i64,
+    pub slot: u8,
+    pub position_ms: i64,
+    pub label: String,
+    pub color_hex: String,
+    pub quantized: bool,
 }
 
 pub async fn get_cue_points(pool: &SqlitePool, song_id: i64) -> Result<Vec<CuePoint>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, song_id, name, position_ms FROM cue_points WHERE song_id = ? ORDER BY position_ms",
+        "SELECT id, song_id, name, position_ms, cue_kind, slot, label, color_hex, updated_at
+         FROM cue_points WHERE song_id = ? ORDER BY position_ms",
     )
     .bind(song_id)
     .fetch_all(pool)
@@ -296,6 +413,11 @@ pub async fn get_cue_points(pool: &SqlitePool, song_id: i64) -> Result<Vec<CuePo
             song_id: r.get("song_id"),
             name: r.get("name"),
             position_ms: r.get("position_ms"),
+            cue_kind: CueKind::from_db(r.get::<String, _>("cue_kind").as_str()),
+            slot: r.get("slot"),
+            label: r.get("label"),
+            color_hex: r.get("color_hex"),
+            updated_at: r.get("updated_at"),
         })
         .collect())
 }
@@ -303,14 +425,32 @@ pub async fn get_cue_points(pool: &SqlitePool, song_id: i64) -> Result<Vec<CuePo
 pub async fn upsert_cue_point(pool: &SqlitePool, cue: &CuePoint) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO cue_points (song_id, name, position_ms)
-        VALUES (?, ?, ?)
-        ON CONFLICT(song_id, name) DO UPDATE SET position_ms = excluded.position_ms
+        INSERT INTO cue_points (song_id, name, position_ms, cue_kind, slot, label, color_hex, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(song_id, name) DO UPDATE SET
+            position_ms = excluded.position_ms,
+            cue_kind = excluded.cue_kind,
+            slot = excluded.slot,
+            label = excluded.label,
+            color_hex = excluded.color_hex,
+            updated_at = excluded.updated_at
         "#,
     )
     .bind(cue.song_id)
     .bind(&cue.name)
     .bind(cue.position_ms)
+    .bind(cue.cue_kind.as_db())
+    .bind(cue.slot)
+    .bind(if cue.label.is_empty() {
+        cue.name.clone()
+    } else {
+        cue.label.clone()
+    })
+    .bind(if cue.color_hex.is_empty() {
+        "#f59e0b".to_string()
+    } else {
+        cue.color_hex.clone()
+    })
     .execute(pool)
     .await?;
     Ok(())
@@ -396,6 +536,139 @@ pub async fn upsert_song_fade_override(
     .bind(row.fade_in_time_ms)
     .bind(&row.crossfade_mode)
     .bind(row.gain_db)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_hot_cues(pool: &SqlitePool, song_id: i64) -> Result<Vec<HotCue>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT song_id, slot, position_ms, label, color_hex
+         FROM cue_points
+         WHERE song_id = ? AND cue_kind = 'hotcue' AND slot IS NOT NULL
+         ORDER BY slot ASC",
+    )
+    .bind(song_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let slot = r.get::<i64, _>("slot");
+            if !(1..=8).contains(&slot) {
+                return None;
+            }
+            Some(HotCue {
+                song_id: r.get("song_id"),
+                slot: slot as u8,
+                position_ms: r.get("position_ms"),
+                label: r.get("label"),
+                color_hex: r.get("color_hex"),
+                quantized: false,
+            })
+        })
+        .collect())
+}
+
+pub async fn get_hot_cue(
+    pool: &SqlitePool,
+    song_id: i64,
+    slot: u8,
+) -> Result<Option<HotCue>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT song_id, slot, position_ms, label, color_hex
+         FROM cue_points
+         WHERE song_id = ? AND cue_kind = 'hotcue' AND slot = ?",
+    )
+    .bind(song_id)
+    .bind(slot as i64)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| HotCue {
+        song_id: r.get("song_id"),
+        slot: r.get::<i64, _>("slot") as u8,
+        position_ms: r.get("position_ms"),
+        label: r.get("label"),
+        color_hex: r.get("color_hex"),
+        quantized: false,
+    }))
+}
+
+pub async fn upsert_hot_cue(pool: &SqlitePool, cue: &HotCue) -> Result<(), sqlx::Error> {
+    let cue_name = format!("hotcue_{}", cue.slot);
+    sqlx::query(
+        r#"
+        INSERT INTO cue_points (song_id, name, position_ms, cue_kind, slot, label, color_hex, updated_at)
+        VALUES (?, ?, ?, 'hotcue', ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(song_id, cue_kind, slot) DO UPDATE SET
+            name = excluded.name,
+            position_ms = excluded.position_ms,
+            label = excluded.label,
+            color_hex = excluded.color_hex,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(cue.song_id)
+    .bind(cue_name)
+    .bind(cue.position_ms)
+    .bind(cue.slot as i64)
+    .bind(if cue.label.is_empty() {
+        format!("Cue {}", cue.slot)
+    } else {
+        cue.label.clone()
+    })
+    .bind(if cue.color_hex.is_empty() {
+        "#f59e0b".to_string()
+    } else {
+        cue.color_hex.clone()
+    })
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn clear_hot_cue(pool: &SqlitePool, song_id: i64, slot: u8) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM cue_points WHERE song_id = ? AND cue_kind = 'hotcue' AND slot = ?")
+        .bind(song_id)
+        .bind(slot as i64)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn rename_hot_cue(
+    pool: &SqlitePool,
+    song_id: i64,
+    slot: u8,
+    label: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE cue_points SET label = ?, updated_at = strftime('%s','now')
+         WHERE song_id = ? AND cue_kind = 'hotcue' AND slot = ?",
+    )
+    .bind(label)
+    .bind(song_id)
+    .bind(slot as i64)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn recolor_hot_cue(
+    pool: &SqlitePool,
+    song_id: i64,
+    slot: u8,
+    color_hex: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE cue_points SET color_hex = ?, updated_at = strftime('%s','now')
+         WHERE song_id = ? AND cue_kind = 'hotcue' AND slot = ?",
+    )
+    .bind(color_hex)
+    .bind(song_id)
+    .bind(slot as i64)
     .execute(pool)
     .await?;
     Ok(())
@@ -601,6 +874,267 @@ pub async fn save_waveform_cache(
     .bind(mtime_ms)
     .bind(resolution)
     .bind(peaks_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Beat-grid cache ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeatGridAnalysis {
+    pub song_id: i64,
+    pub file_path: String,
+    pub mtime_ms: i64,
+    pub bpm: f32,
+    pub first_beat_ms: i64,
+    pub confidence: f32,
+    pub beat_times_ms: Vec<i64>,
+    pub updated_at: Option<i64>,
+}
+
+pub async fn get_beatgrid_analysis(
+    pool: &SqlitePool,
+    song_id: i64,
+    file_path: &str,
+    mtime_ms: i64,
+) -> Result<Option<BeatGridAnalysis>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT song_id, file_path, mtime_ms, bpm, first_beat_ms, confidence, beat_times_json, updated_at
+         FROM beatgrid_analysis WHERE song_id = ? AND file_path = ? AND mtime_ms = ?",
+    )
+    .bind(song_id)
+    .bind(file_path)
+    .bind(mtime_ms)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| BeatGridAnalysis {
+        song_id: r.get("song_id"),
+        file_path: r.get("file_path"),
+        mtime_ms: r.get("mtime_ms"),
+        bpm: r.get::<f64, _>("bpm") as f32,
+        first_beat_ms: r.get("first_beat_ms"),
+        confidence: r.get::<f64, _>("confidence") as f32,
+        beat_times_ms: serde_json::from_str::<Vec<i64>>(&r.get::<String, _>("beat_times_json"))
+            .unwrap_or_default(),
+        updated_at: r.get("updated_at"),
+    }))
+}
+
+pub async fn get_latest_beatgrid_by_song_id(
+    pool: &SqlitePool,
+    song_id: i64,
+) -> Result<Option<BeatGridAnalysis>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT song_id, file_path, mtime_ms, bpm, first_beat_ms, confidence, beat_times_json, updated_at
+         FROM beatgrid_analysis WHERE song_id = ? LIMIT 1",
+    )
+    .bind(song_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| BeatGridAnalysis {
+        song_id: r.get("song_id"),
+        file_path: r.get("file_path"),
+        mtime_ms: r.get("mtime_ms"),
+        bpm: r.get::<f64, _>("bpm") as f32,
+        first_beat_ms: r.get("first_beat_ms"),
+        confidence: r.get::<f64, _>("confidence") as f32,
+        beat_times_ms: serde_json::from_str::<Vec<i64>>(&r.get::<String, _>("beat_times_json"))
+            .unwrap_or_default(),
+        updated_at: r.get("updated_at"),
+    }))
+}
+
+pub async fn save_beatgrid_analysis(
+    pool: &SqlitePool,
+    analysis: &BeatGridAnalysis,
+) -> Result<(), sqlx::Error> {
+    let beat_times_json =
+        serde_json::to_string(&analysis.beat_times_ms).unwrap_or_else(|_| "[]".to_string());
+    sqlx::query(
+        r#"
+        INSERT INTO beatgrid_analysis
+            (song_id, file_path, mtime_ms, bpm, first_beat_ms, confidence, beat_times_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(song_id) DO UPDATE SET
+            file_path = excluded.file_path,
+            mtime_ms = excluded.mtime_ms,
+            bpm = excluded.bpm,
+            first_beat_ms = excluded.first_beat_ms,
+            confidence = excluded.confidence,
+            beat_times_json = excluded.beat_times_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(analysis.song_id)
+    .bind(&analysis.file_path)
+    .bind(analysis.mtime_ms)
+    .bind(analysis.bpm as f64)
+    .bind(analysis.first_beat_ms)
+    .bind(analysis.confidence as f64)
+    .bind(beat_times_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Stem analysis cache ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StemAnalysis {
+    pub song_id: i64,
+    pub source_file_path: String,
+    pub source_mtime_ms: i64,
+    pub vocals_file_path: String,
+    pub instrumental_file_path: String,
+    pub model_name: String,
+    pub updated_at: Option<i64>,
+}
+
+pub async fn get_stem_analysis(
+    pool: &SqlitePool,
+    song_id: i64,
+    source_file_path: &str,
+    source_mtime_ms: i64,
+) -> Result<Option<StemAnalysis>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT song_id, source_file_path, source_mtime_ms, vocals_file_path, instrumental_file_path, model_name, updated_at
+         FROM stem_analysis WHERE song_id = ? AND source_file_path = ? AND source_mtime_ms = ?",
+    )
+    .bind(song_id)
+    .bind(source_file_path)
+    .bind(source_mtime_ms)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(map_stem_analysis_row))
+}
+
+pub async fn get_latest_stem_analysis_by_song_id(
+    pool: &SqlitePool,
+    song_id: i64,
+) -> Result<Option<StemAnalysis>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT song_id, source_file_path, source_mtime_ms, vocals_file_path, instrumental_file_path, model_name, updated_at
+         FROM stem_analysis WHERE song_id = ? LIMIT 1",
+    )
+    .bind(song_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(map_stem_analysis_row))
+}
+
+pub async fn save_stem_analysis(
+    pool: &SqlitePool,
+    analysis: &StemAnalysis,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO stem_analysis
+            (song_id, source_file_path, source_mtime_ms, vocals_file_path, instrumental_file_path, model_name, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(song_id) DO UPDATE SET
+            source_file_path = excluded.source_file_path,
+            source_mtime_ms = excluded.source_mtime_ms,
+            vocals_file_path = excluded.vocals_file_path,
+            instrumental_file_path = excluded.instrumental_file_path,
+            model_name = excluded.model_name,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(analysis.song_id)
+    .bind(&analysis.source_file_path)
+    .bind(analysis.source_mtime_ms)
+    .bind(&analysis.vocals_file_path)
+    .bind(&analysis.instrumental_file_path)
+    .bind(&analysis.model_name)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn map_stem_analysis_row(r: sqlx::sqlite::SqliteRow) -> StemAnalysis {
+    StemAnalysis {
+        song_id: r.get("song_id"),
+        source_file_path: r.get("source_file_path"),
+        source_mtime_ms: r.get("source_mtime_ms"),
+        vocals_file_path: r.get("vocals_file_path"),
+        instrumental_file_path: r.get("instrumental_file_path"),
+        model_name: r.get("model_name"),
+        updated_at: r.get("updated_at"),
+    }
+}
+
+// ── Cue monitor routing ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorRoutingConfig {
+    pub master_device_id: Option<String>,
+    pub cue_device_id: Option<String>,
+    pub cue_mix_mode: String,
+    pub cue_level: f32,
+    pub master_level: f32,
+}
+
+impl Default for MonitorRoutingConfig {
+    fn default() -> Self {
+        Self {
+            master_device_id: None,
+            cue_device_id: None,
+            cue_mix_mode: "split".to_string(),
+            cue_level: 1.0,
+            master_level: 1.0,
+        }
+    }
+}
+
+pub async fn get_monitor_routing_config(
+    pool: &SqlitePool,
+) -> Result<MonitorRoutingConfig, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT master_device_id, cue_device_id, cue_mix_mode, cue_level, master_level
+         FROM monitor_routing_config WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => Ok(MonitorRoutingConfig {
+            master_device_id: r.get("master_device_id"),
+            cue_device_id: r.get("cue_device_id"),
+            cue_mix_mode: r.get("cue_mix_mode"),
+            cue_level: r.get::<f64, _>("cue_level") as f32,
+            master_level: r.get::<f64, _>("master_level") as f32,
+        }),
+        None => Ok(MonitorRoutingConfig::default()),
+    }
+}
+
+pub async fn save_monitor_routing_config(
+    pool: &SqlitePool,
+    config: &MonitorRoutingConfig,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO monitor_routing_config
+            (id, master_device_id, cue_device_id, cue_mix_mode, cue_level, master_level)
+        VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            master_device_id = excluded.master_device_id,
+            cue_device_id = excluded.cue_device_id,
+            cue_mix_mode = excluded.cue_mix_mode,
+            cue_level = excluded.cue_level,
+            master_level = excluded.master_level
+        "#,
+    )
+    .bind(&config.master_device_id)
+    .bind(&config.cue_device_id)
+    .bind(&config.cue_mix_mode)
+    .bind(config.cue_level as f64)
+    .bind(config.master_level as f64)
     .execute(pool)
     .await?;
     Ok(())

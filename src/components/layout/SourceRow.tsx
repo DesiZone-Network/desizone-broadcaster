@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef } from "react";
-import { Play, Pause, Square, Volume2, Mic } from "lucide-react";
+import { Play, Pause, Square, Volume2, Mic, X } from "lucide-react";
 import {
     playDeck,
     pauseDeck,
-    seekDeck,
+    stopDeck,
     setChannelGain,
-    setDeckPitch,
     setDeckTempo,
     onDeckStateChanged,
     onVuMeter,
@@ -22,11 +21,13 @@ import { VUMeter } from "../deck/VUMeter";
 import { parseSongDragPayload } from "../../lib/songDrag";
 
 interface SourceChannel {
-    id: DeckId;
+    id: SourceDeckId;
     label: string;
     color: string;
     icon?: React.ReactNode;
 }
+
+type SourceDeckId = Extract<DeckId, "aux_1" | "aux_2" | "sound_fx" | "voice_fx">;
 
 const SOURCES: SourceChannel[] = [
     { id: "aux_1",    label: "AUX 1",    color: "#22c55e" },
@@ -50,10 +51,15 @@ function filenameFromPath(path?: string | null): string {
     return base.replace(/\.[^.]+$/, "");
 }
 
-function SourceStrip({ ch }: { ch: SourceChannel }) {
+function SourceStrip({
+    ch,
+    onHide,
+}: {
+    ch: SourceChannel;
+    onHide?: () => void;
+}) {
     const [isPlaying, setIsPlaying] = useState(false);
     const [volume, setVolume] = useState(1.0);
-    const [pitchPct, setPitchPct] = useState(0);
     const [tempoPct, setTempoPct] = useState(0);
     const [vuData, setVuData] = useState<VuEvent | null>(null);
     const [deckState, setDeckState] = useState<DeckStateEvent | null>(null);
@@ -69,7 +75,6 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
             if (!s) return;
             setDeckState(s);
             setIsPlaying(s.state === "playing" || s.state === "crossfading");
-            if (typeof s.pitch_pct === "number") setPitchPct(s.pitch_pct);
             if (typeof s.tempo_pct === "number") setTempoPct(s.tempo_pct);
         }).catch(() => {});
 
@@ -77,7 +82,6 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
             if (e.deck === ch.id) {
                 setDeckState(e);
                 setIsPlaying(e.state === "playing" || e.state === "crossfading");
-                if (typeof e.pitch_pct === "number") setPitchPct(e.pitch_pct);
                 if (typeof e.tempo_pct === "number") setTempoPct(e.tempo_pct);
             }
         });
@@ -131,12 +135,6 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
         const v = parseFloat(e.target.value);
         setVolume(v);
         setChannelGain(ch.id, v).catch(console.error);
-    };
-
-    const handlePitchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const v = parseFloat(e.target.value);
-        setPitchPct(v);
-        setDeckPitch(ch.id, v).catch(console.error);
     };
 
     const handleTempoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -222,6 +220,16 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
                 >
                     {loadError ? "⚠ ERR" : ch.label}
                 </span>
+                {onHide && (
+                    <button
+                        className="btn btn-ghost btn-icon"
+                        style={{ width: 14, height: 14, color: "var(--text-dim)" }}
+                        title={`Hide ${ch.label}`}
+                        onClick={onHide}
+                    >
+                        <X size={10} />
+                    </button>
+                )}
             </div>
 
             <button
@@ -281,7 +289,7 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
                         background: "var(--bg-input)", color: "var(--text-muted)",
                         cursor: "pointer",
                     }}
-                    onClick={() => { seekDeck(ch.id, 0); pauseDeck(ch.id); }}
+                    onClick={() => { stopDeck(ch.id).catch(console.error); }}
                 >
                     <Square size={11} />
                 </button>
@@ -306,23 +314,10 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
             </span>
             <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset volume" onClick={() => { setVolume(1); setChannelGain(ch.id, 1).catch(console.error); }}>↺</button>
 
-            {/* Pitch + Tempo */}
+            {/* Tempo */}
             <div style={{ display: "flex", flexDirection: "column", gap: 2, width: 110, marginLeft: 2 }}>
                 <div className="flex items-center gap-1">
-                    <span className="mono text-muted" style={{ fontSize: 8, minWidth: 16 }}>P</span>
-                    <input
-                        type="range"
-                        min={-50}
-                        max={50}
-                        step={0.1}
-                        value={pitchPct}
-                        onChange={handlePitchChange}
-                        style={{ flex: 1, accentColor: ch.color, height: 2 }}
-                    />
-                    <button className="btn btn-ghost btn-icon" style={{ width: 14, height: 14 }} title="Reset pitch" onClick={() => { setPitchPct(0); setDeckPitch(ch.id, 0).catch(console.error); }}>↺</button>
-                </div>
-                <div className="flex items-center gap-1">
-                    <span className="mono text-muted" style={{ fontSize: 8, minWidth: 16 }}>T</span>
+                    <span className="mono text-muted" style={{ fontSize: 8, minWidth: 38 }}>TEMPO</span>
                     <input
                         type="range"
                         min={-50}
@@ -342,7 +337,51 @@ function SourceStrip({ ch }: { ch: SourceChannel }) {
     );
 }
 
-export function SourceRow() {
+interface SourceRowProps {
+    visibleSourceIds?: SourceDeckId[];
+    onToggleSource?: (deck: SourceDeckId) => void;
+    onShowAllSources?: () => void;
+}
+
+export function SourceRow({
+    visibleSourceIds,
+    onToggleSource,
+    onShowAllSources,
+}: SourceRowProps = {}) {
+    const visibleSet = visibleSourceIds ? new Set<SourceDeckId>(visibleSourceIds) : null;
+    const visibleSources = visibleSet
+        ? SOURCES.filter((s) => visibleSet.has(s.id))
+        : SOURCES;
+
+    if (visibleSources.length === 0) {
+        return (
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    padding: "8px 12px",
+                    background: "var(--bg-panel)",
+                    border: "1px dashed var(--border-strong)",
+                    borderRadius: "var(--r-md)",
+                    flexShrink: 0,
+                }}
+            >
+                <span style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.08em" }}>
+                    ALL SOURCES HIDDEN
+                </span>
+                <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 10, minHeight: 20, padding: "2px 8px" }}
+                    onClick={() => onShowAllSources?.()}
+                >
+                    Show Sources
+                </button>
+            </div>
+        );
+    }
+
     return (
         <div
             style={{
@@ -353,8 +392,12 @@ export function SourceRow() {
                 flexShrink: 0,
             }}
         >
-            {SOURCES.map((ch) => (
-                <SourceStrip key={ch.id} ch={ch} />
+            {visibleSources.map((ch) => (
+                <SourceStrip
+                    key={ch.id}
+                    ch={ch}
+                    onHide={onToggleSource ? () => onToggleSource(ch.id) : undefined}
+                />
             ))}
         </div>
     );

@@ -46,8 +46,14 @@ pub async fn get_waveform_data(
         }
     }
 
-    let samples = decode_mono_abs(path)?;
-    let peaks = downsample_peaks(&samples, resolution as usize);
+    let path_buf = path.to_path_buf();
+    let resolution_usize = resolution as usize;
+    let peaks = tauri::async_runtime::spawn_blocking(move || {
+        let samples = decode_mono_abs(&path_buf)?;
+        Ok::<Vec<f32>, String>(downsample_peaks(&samples, resolution_usize))
+    })
+    .await
+    .map_err(|e| format!("Waveform worker join failed: {e}"))??;
 
     if let Some(local) = &state.local_db {
         let _ =

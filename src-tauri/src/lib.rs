@@ -16,15 +16,24 @@ use commands::{
         get_song_play_history, get_top_songs, write_event_log,
     },
     audio_commands::{
-        get_deck_state, get_vu_readings, load_track, pause_deck, play_deck, seek_deck,
-        set_channel_gain, set_deck_pitch, set_deck_tempo,
+        clear_deck_loop, get_deck_state, get_vu_readings, load_track, next_deck, pause_deck,
+        play_deck, seek_deck, set_channel_gain, set_deck_loop, set_deck_pitch, set_deck_tempo,
+        stop_deck,
     },
+    beatgrid_commands::{analyze_beatgrid, get_beatgrid},
     crossfade_commands::{
         get_crossfade_config, get_fade_curve_preview, set_crossfade_config, set_manual_crossfade,
         start_crossfade, trigger_manual_fade,
     },
-    cue_commands::{delete_cue_point, get_cue_points, jump_to_cue, set_cue_point},
-    dsp_commands::{get_channel_dsp, set_channel_agc, set_channel_eq, set_pipeline_settings},
+    cue_commands::{
+        clear_hot_cue, delete_cue_point, get_cue_points, get_hot_cues, get_monitor_routing_config,
+        jump_to_cue, recolor_hot_cue, rename_hot_cue, set_cue_point, set_deck_cue_preview_enabled,
+        set_hot_cue, set_monitor_routing_config, trigger_hot_cue,
+    },
+    dsp_commands::{
+        get_channel_dsp, set_channel_agc, set_channel_eq, set_channel_stem_filter,
+        set_pipeline_settings,
+    },
     encoder_commands::{
         delete_encoder, get_current_listeners, get_encoder_runtime, get_encoders,
         get_listener_stats, push_track_metadata, save_encoder, start_all_encoders, start_encoder,
@@ -41,13 +50,12 @@ use commands::{
     },
     queue_commands::{
         add_to_queue, complete_queue_item, get_history, get_queue, get_song, get_song_types,
-        get_songs_by_weight_range, get_songs_in_category, remove_from_queue, search_songs,
-        update_song,
+        get_songs_by_weight_range, get_songs_in_category, remove_from_queue, reorder_queue,
+        search_songs, update_song,
     },
     sam_db_commands::{
         connect_sam_db, create_sam_category, disconnect_sam_db, get_sam_categories,
-        get_sam_db_config_cmd, get_sam_db_status, save_sam_db_config_cmd,
-        test_sam_db_connection,
+        get_sam_db_config_cmd, get_sam_db_status, save_sam_db_config_cmd, test_sam_db_connection,
     },
     scheduler_commands::{
         accept_request_p3, delete_rotation_rule, delete_show, enqueue_next_clockwheel_track,
@@ -59,10 +67,15 @@ use commands::{
         set_autodj_transition_config, set_dj_mode, set_gap_killer_config, set_request_policy,
     },
     script_commands::{delete_script, get_script_log, get_scripts, run_script, save_script},
+    stem_commands::{
+        analyze_stems, get_latest_stem_analysis, get_stem_analysis, get_stems_runtime_status,
+        install_stems_runtime, set_deck_stem_source,
+    },
     stream_commands::{get_stream_status, start_stream, stop_stream},
     waveform_commands::get_waveform_data,
 };
 use state::AppState;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -78,7 +91,7 @@ pub fn run() {
     std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
     let db_path = format!("{app_data_dir}/app.db");
 
-    let (local_pool, sam_pool_opt, startup_crossfade_cfg, startup_autodj_cfg) =
+    let (local_pool, sam_pool_opt, startup_crossfade_cfg, startup_autodj_cfg, startup_monitor_cfg) =
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -112,6 +125,7 @@ pub fn run() {
                         crate::commands::crossfade_commands::parse_crossfade_config_json(&json);
                     startup_crossfade_cfg = Some(cfg);
                 }
+                let startup_monitor_cfg = db::local::get_monitor_routing_config(&local).await.ok();
 
                 // 2. SAM MySQL — attempt auto-connect if configured
                 let sam_opt = match db::local::load_sam_db_config_full(&local).await {
@@ -143,7 +157,13 @@ pub fn run() {
                     _ => None,
                 };
 
-                (local, sam_opt, startup_crossfade_cfg, startup_autodj_cfg)
+                (
+                    local,
+                    sam_opt,
+                    startup_crossfade_cfg,
+                    startup_autodj_cfg,
+                    startup_monitor_cfg,
+                )
             });
 
     // ── AppState assembly ────────────────────────────────────────────────────
@@ -153,6 +173,13 @@ pub fn run() {
     }
     if let Some(cfg) = startup_autodj_cfg {
         crate::scheduler::autodj::set_auto_transition_config(cfg);
+    }
+    if let Some(cfg) = startup_monitor_cfg {
+        app_state
+            .engine
+            .lock()
+            .unwrap()
+            .set_monitor_routing_config(cfg);
     }
     if let Some(pool) = sam_pool_opt {
         app_state = app_state.with_sam_db(pool);
@@ -164,6 +191,15 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(app_state)
         .setup(|app| {
+            // Force main window visible/focused in dev. This avoids cases where
+            // the process is running but the webview starts hidden/off-screen.
+            if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.show();
+                let _ = main_window.unminimize();
+                let _ = main_window.center();
+                let _ = main_window.set_focus();
+            }
+
             // ── Background polling loop ──────────────────────────────────────
             // Emits `deck_state_changed` (every 80 ms) and `vu_meter` events
             // to the frontend, since the audio engine is poll-based (no push).
@@ -327,44 +363,47 @@ pub fn run() {
                     if no_playing {
                         pending_sam_start = None;
                         sam_below_threshold_since.clear();
-                        if is_ready(a_state) {
-                            let mut engine = state.engine.lock().unwrap();
-                            let _ = engine.set_manual_crossfade(-1.0);
-                            let _ = engine.play(DeckId::DeckA);
-                            continue;
-                        }
-                        if is_ready(b_state) {
-                            let mut engine = state.engine.lock().unwrap();
-                            let _ = engine.set_manual_crossfade(1.0);
-                            let _ = engine.play(DeckId::DeckB);
-                            continue;
-                        }
-                        if let Some(next) = pick_next_track(&state, mode, &claimed_queue_ids).await
-                        {
-                            let queue_to_claim = next.queue_id;
-                            let loaded = {
-                                let mut engine = state.engine.lock().unwrap();
-                                engine
-                                    .load_track_with_source(
-                                        DeckId::DeckA,
-                                        std::path::PathBuf::from(&next.file_path),
-                                        Some(next.song_id),
-                                        next.queue_id,
-                                        next.from_rotation,
-                                        next.declared_duration_ms,
-                                    )
-                                    .is_ok()
-                            };
-                            if loaded {
-                                if let Some(qid) = next.queue_id {
-                                    claimed_queue_ids.insert(qid);
-                                    claim_queue_item(&state, qid).await;
-                                }
+                        if mode == DjMode::AutoDj {
+                            if is_ready(a_state) {
                                 let mut engine = state.engine.lock().unwrap();
                                 let _ = engine.set_manual_crossfade(-1.0);
                                 let _ = engine.play(DeckId::DeckA);
-                            } else if let Some(qid) = queue_to_claim {
-                                claimed_queue_ids.remove(&qid);
+                                continue;
+                            }
+                            if is_ready(b_state) {
+                                let mut engine = state.engine.lock().unwrap();
+                                let _ = engine.set_manual_crossfade(1.0);
+                                let _ = engine.play(DeckId::DeckB);
+                                continue;
+                            }
+                            if let Some(next) =
+                                pick_next_track(&state, mode, &claimed_queue_ids).await
+                            {
+                                let queue_to_claim = next.queue_id;
+                                let loaded = {
+                                    let mut engine = state.engine.lock().unwrap();
+                                    engine
+                                        .load_track_with_source(
+                                            DeckId::DeckA,
+                                            std::path::PathBuf::from(&next.file_path),
+                                            Some(next.song_id),
+                                            next.queue_id,
+                                            next.from_rotation,
+                                            next.declared_duration_ms,
+                                        )
+                                        .is_ok()
+                                };
+                                if loaded {
+                                    if let Some(qid) = next.queue_id {
+                                        claimed_queue_ids.insert(qid);
+                                        claim_queue_item(&state, qid).await;
+                                    }
+                                    let mut engine = state.engine.lock().unwrap();
+                                    let _ = engine.set_manual_crossfade(-1.0);
+                                    let _ = engine.play(DeckId::DeckA);
+                                } else if let Some(qid) = queue_to_claim {
+                                    claimed_queue_ids.remove(&qid);
+                                }
                             }
                         }
                         continue;
@@ -903,10 +942,14 @@ pub fn run() {
             load_track,
             play_deck,
             pause_deck,
+            stop_deck,
+            next_deck,
             seek_deck,
             set_channel_gain,
             set_deck_pitch,
             set_deck_tempo,
+            set_deck_loop,
+            clear_deck_loop,
             get_deck_state,
             get_vu_readings,
             // Phase 1 — Crossfade
@@ -920,16 +963,33 @@ pub fn run() {
             get_channel_dsp,
             set_channel_eq,
             set_channel_agc,
+            set_channel_stem_filter,
             set_pipeline_settings,
+            analyze_stems,
+            get_stem_analysis,
+            get_latest_stem_analysis,
+            get_stems_runtime_status,
+            install_stems_runtime,
+            set_deck_stem_source,
             // Phase 1 — Cue points
             get_cue_points,
             set_cue_point,
             delete_cue_point,
             jump_to_cue,
+            get_hot_cues,
+            set_hot_cue,
+            clear_hot_cue,
+            trigger_hot_cue,
+            rename_hot_cue,
+            recolor_hot_cue,
+            get_monitor_routing_config,
+            set_monitor_routing_config,
+            set_deck_cue_preview_enabled,
             // Phase 1 — Queue / SAM
             get_queue,
             add_to_queue,
             remove_from_queue,
+            reorder_queue,
             complete_queue_item,
             search_songs,
             get_songs_by_weight_range,
@@ -1014,6 +1074,9 @@ pub fn run() {
             export_report_csv,
             // Waveform analysis/cache
             get_waveform_data,
+            // Beat-grid analysis/cache
+            analyze_beatgrid,
+            get_beatgrid,
             // Phase 3 — Scheduler / AutoDJ / Requests
             get_dj_mode,
             set_dj_mode,
@@ -1122,7 +1185,9 @@ fn cue_value(cues: &[crate::db::local::CuePoint], names: &[&str]) -> Option<u64>
     for name in names {
         if let Some(cp) = cues
             .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .find(|c| {
+                c.cue_kind != crate::db::local::CueKind::Hotcue && c.name.eq_ignore_ascii_case(name)
+            })
             .map(|c| c.position_ms.max(0) as u64)
         {
             return Some(cp);

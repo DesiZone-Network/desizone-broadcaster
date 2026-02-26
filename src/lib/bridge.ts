@@ -55,6 +55,7 @@ export interface DeckStateEvent {
   tempo_pct?: number;
   decoder_buffer_ms: number;
   rms_db_pre_fader: number;
+  cue_preview_enabled?: boolean;
 }
 
 export interface VuEvent {
@@ -74,6 +75,66 @@ export interface CuePoint {
   song_id: number;
   name: string;
   position_ms: number;
+  cue_kind?: "hotcue" | "memory" | "transition";
+  slot?: number | null;
+  label?: string;
+  color_hex?: string;
+  updated_at?: number | null;
+}
+
+export type CueQuantize = "off" | "beat_1" | "beat_half" | "beat_quarter";
+
+export interface HotCue {
+  song_id: number;
+  slot: number;
+  position_ms: number;
+  label: string;
+  color_hex: string;
+  quantized: boolean;
+}
+
+export interface BeatGridAnalysis {
+  song_id: number;
+  file_path: string;
+  mtime_ms: number;
+  bpm: number;
+  first_beat_ms: number;
+  confidence: number;
+  beat_times_ms: number[];
+  updated_at?: number | null;
+}
+
+export interface StemAnalysis {
+  song_id: number;
+  source_file_path: string;
+  source_mtime_ms: number;
+  vocals_file_path: string;
+  instrumental_file_path: string;
+  model_name: string;
+  updated_at?: number | null;
+}
+
+export type StemPlaybackSource = "original" | "vocals" | "instrumental";
+
+export interface DeckStemSourceResult {
+  source: StemPlaybackSource;
+  file_path: string;
+}
+
+export interface StemsRuntimeStatus {
+  ready: boolean;
+  runtime_dir: string;
+  python_path: string | null;
+  ffmpeg_available: boolean;
+  message: string;
+}
+
+export interface MonitorRoutingConfig {
+  master_device_id: string | null;
+  cue_device_id: string | null;
+  cue_mix_mode: string;
+  cue_level: number;
+  master_level: number;
 }
 
 export interface SamSong {
@@ -195,7 +256,12 @@ export interface PipelineSettings {
     enabled: boolean;
     ceiling_db: number;
   };
+  stem_filter: {
+    mode: "off" | "vocal" | "instrumental";
+    amount: number;
+  };
 }
+export type StemFilterMode = "off" | "vocal" | "instrumental";
 
 // ── Deck control ─────────────────────────────────────────────────────────────
 
@@ -205,6 +271,10 @@ export const loadTrack = (deck: DeckId, filePath: string, songId?: number) =>
 export const playDeck = (deck: DeckId) => invoke<void>("play_deck", { deck });
 
 export const pauseDeck = (deck: DeckId) => invoke<void>("pause_deck", { deck });
+
+export const stopDeck = (deck: DeckId) => invoke<void>("stop_deck", { deck });
+
+export const nextDeck = (deck: DeckId) => invoke<void>("next_deck", { deck });
 
 export const seekDeck = (deck: DeckId, positionMs: number) =>
   invoke<void>("seek_deck", { deck, positionMs });
@@ -217,6 +287,12 @@ export const setDeckPitch = (deck: DeckId, pitchPct: number) =>
 
 export const setDeckTempo = (deck: DeckId, tempoPct: number) =>
   invoke<void>("set_deck_tempo", { deck, tempoPct });
+
+export const setDeckLoop = (deck: DeckId, startMs: number, endMs: number) =>
+  invoke<void>("set_deck_loop", { deck, startMs, endMs });
+
+export const clearDeckLoop = (deck: DeckId) =>
+  invoke<void>("clear_deck_loop", { deck });
 
 export const getDeckState = (deck: DeckId) =>
   invoke<DeckStateEvent | null>("get_deck_state", { deck });
@@ -275,6 +351,17 @@ export const setPipelineSettings = (
 ) =>
   invoke<void>("set_pipeline_settings", { channel, settings });
 
+export const setChannelStemFilter = (
+  channel: DeckId | "master",
+  mode: StemFilterMode,
+  amount?: number
+) =>
+  invoke<void>("set_channel_stem_filter", {
+    channel,
+    mode,
+    amount: amount ?? null,
+  });
+
 // ── Cue points ───────────────────────────────────────────────────────────────
 
 export const getCuePoints = (songId: number) =>
@@ -289,6 +376,99 @@ export const deleteCuePoint = (songId: number, name: string) =>
 export const jumpToCue = (deck: DeckId, songId: number, cueName: string) =>
   invoke<void>("jump_to_cue", { deck, songId, cueName });
 
+export const getHotCues = (songId: number) =>
+  invoke<HotCue[]>("get_hot_cues", { songId });
+
+export const setHotCue = (
+  songId: number,
+  slot: number,
+  positionMs: number,
+  label?: string,
+  colorHex?: string,
+  quantizeMode?: CueQuantize
+) =>
+  invoke<HotCue>("set_hot_cue", {
+    songId,
+    slot,
+    positionMs,
+    label: label ?? null,
+    colorHex: colorHex ?? null,
+    quantizeMode: quantizeMode ?? null,
+  });
+
+export const clearHotCue = (songId: number, slot: number) =>
+  invoke<void>("clear_hot_cue", { songId, slot });
+
+export const triggerHotCue = (
+  deck: DeckId,
+  songId: number,
+  slot: number,
+  quantizeMode?: CueQuantize
+) =>
+  invoke<HotCue>("trigger_hot_cue", {
+    deck,
+    songId,
+    slot,
+    quantizeMode: quantizeMode ?? null,
+  });
+
+export const renameHotCue = (songId: number, slot: number, label: string) =>
+  invoke<void>("rename_hot_cue", { songId, slot, label });
+
+export const recolorHotCue = (songId: number, slot: number, colorHex: string) =>
+  invoke<void>("recolor_hot_cue", { songId, slot, colorHex });
+
+export const analyzeBeatgrid = (
+  songId: number,
+  filePath: string,
+  forceReanalyze = false
+) =>
+  invoke<BeatGridAnalysis>("analyze_beatgrid", { songId, filePath, forceReanalyze });
+
+export const getBeatgrid = (songId: number, filePath: string) =>
+  invoke<BeatGridAnalysis | null>("get_beatgrid", { songId, filePath });
+
+export const analyzeStems = (
+  songId: number,
+  filePath: string,
+  forceReanalyze = false
+) =>
+  invoke<StemAnalysis>("analyze_stems", { songId, filePath, forceReanalyze });
+
+export const getStemAnalysis = (songId: number, filePath: string) =>
+  invoke<StemAnalysis | null>("get_stem_analysis", { songId, filePath });
+
+export const getLatestStemAnalysis = (songId: number) =>
+  invoke<StemAnalysis | null>("get_latest_stem_analysis", { songId });
+
+export const getStemsRuntimeStatus = () =>
+  invoke<StemsRuntimeStatus>("get_stems_runtime_status");
+
+export const installStemsRuntime = () =>
+  invoke<StemsRuntimeStatus>("install_stems_runtime");
+
+export const setDeckStemSource = (
+  deck: DeckId,
+  source: StemPlaybackSource,
+  songId?: number,
+  originalFilePath?: string
+) =>
+  invoke<DeckStemSourceResult>("set_deck_stem_source", {
+    deck,
+    source,
+    songId: songId ?? null,
+    originalFilePath: originalFilePath ?? null,
+  });
+
+export const getMonitorRoutingConfig = () =>
+  invoke<MonitorRoutingConfig>("get_monitor_routing_config");
+
+export const setMonitorRoutingConfig = (config: MonitorRoutingConfig) =>
+  invoke<void>("set_monitor_routing_config", { config });
+
+export const setDeckCuePreviewEnabled = (deck: DeckId, enabled: boolean) =>
+  invoke<void>("set_deck_cue_preview_enabled", { deck, enabled });
+
 // ── Queue / SAM ──────────────────────────────────────────────────────────────
 
 export const getQueue = () => invoke<QueueEntry[]>("get_queue");
@@ -298,6 +478,9 @@ export const addToQueue = (songId: number) =>
 
 export const removeFromQueue = (queueId: number) =>
   invoke<void>("remove_from_queue", { queueId });
+
+export const reorderQueue = (queueIds: number[]) =>
+  invoke<void>("reorder_queue", { queueIds });
 
 /** Remove queue entry AND write a full history snapshot in one call. */
 export const completeQueueItem = (queueId: number, songId: number) =>

@@ -21,6 +21,7 @@ import {
     enqueueNextClockwheelTrack,
     getQueue,
     onDeckStateChanged,
+    reorderQueue,
     removeFromQueue,
     QueueEntry,
     SamSong,
@@ -167,14 +168,35 @@ export function QueuePanel() {
         };
     }, [loadQueue]);
 
-    const handleDragEnd = (event: DragEndEvent) => {
+    const handleDragEnd = async (event: DragEndEvent) => {
         const { active, over } = event;
         if (over && active.id !== over.id) {
+            let reordered: QueueItem[] = [];
             setItems((prev) => {
-                const oldIdx = prev.findIndex((i) => (i.id ?? 0) === active.id);
-                const newIdx = prev.findIndex((i) => (i.id ?? 0) === over.id);
-                return arrayMove(prev, oldIdx, newIdx);
+                const activeKey = String(active.id);
+                const overKey = String(over.id);
+                const oldIdx = prev.findIndex((i) => String(i.id ?? 0) === activeKey);
+                const newIdx = prev.findIndex((i) => String(i.id ?? 0) === overKey);
+                if (oldIdx < 0 || newIdx < 0 || oldIdx === newIdx) {
+                    reordered = prev;
+                    return prev;
+                }
+                reordered = arrayMove(prev, oldIdx, newIdx);
+                return reordered;
             });
+
+            const queueIds = reordered
+                .map((item) => item.id)
+                .filter((id): id is number => id != null);
+
+            if (queueIds.length > 1) {
+                try {
+                    await reorderQueue(queueIds);
+                } catch (e) {
+                    console.error("reorderQueue error:", e);
+                    loadQueue();
+                }
+            }
         }
     };
 

@@ -276,6 +276,26 @@ pub async fn remove_from_queue(pool: &MySqlPool, queue_id: i64) -> Result<(), sq
     Ok(())
 }
 
+/// Persist queue ordering by rewriting `sortID` values in the order provided.
+/// The first id gets sortID=1, second gets 2, etc.
+pub async fn reorder_queue(pool: &MySqlPool, queue_ids: &[i64]) -> Result<(), sqlx::Error> {
+    if queue_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    for (idx, queue_id) in queue_ids.iter().enumerate() {
+        let sort_id = (idx as f64) + 1.0;
+        sqlx::query("UPDATE queuelist SET sortID = ? WHERE ID = ?")
+            .bind(sort_id)
+            .bind(*queue_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 // ── historylist ──────────────────────────────────────────────────────────────
 
 /// A row from SAM's `historylist` table.
@@ -721,10 +741,7 @@ pub async fn create_category(
             match maybe_level {
                 Some(level) => level,
                 None => {
-                    return Err(format!(
-                        "Parent category with ID {} does not exist",
-                        parent
-                    ));
+                    return Err(format!("Parent category with ID {} does not exist", parent));
                 }
             }
         } else {

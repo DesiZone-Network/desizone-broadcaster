@@ -4,6 +4,7 @@ import { TopBar } from "./TopBar";
 import { SourceRow } from "./SourceRow";
 import { BottomPanel } from "./BottomPanel";
 import { DeckPanel } from "../deck/DeckPanel";
+import { DeckWaveformStack } from "../deck/DeckWaveformStack";
 import { CrossfadeBar } from "../crossfade/CrossfadeBar";
 import { AudioPipelineDiagram } from "../pipeline/AudioPipelineDiagram";
 import { ChannelDspDialog } from "../dsp/ChannelDspDialog";
@@ -28,6 +29,56 @@ import { MicSettings } from "../voice/MicSettings";
 import { VoiceTrackRecorder } from "../voice/VoiceTrackRecorder";
 
 type PipelineTarget = { channel: DeckId | "master"; label: string; stage: string } | null;
+type LayoutState = {
+    deckA: boolean;
+    deckB: boolean;
+    xfade: boolean;
+    sources: boolean;
+    sourceAux1: boolean;
+    sourceAux2: boolean;
+    sourceSfx: boolean;
+    sourceVoiceFx: boolean;
+    voiceStrip: boolean;
+};
+
+const DEFAULT_LAYOUT: LayoutState = {
+    deckA: true,
+    deckB: true,
+    xfade: true,
+    sources: true,
+    sourceAux1: true,
+    sourceAux2: true,
+    sourceSfx: true,
+    sourceVoiceFx: true,
+    voiceStrip: true,
+};
+
+const SOURCE_LAYOUT_KEY_BY_DECK: Record<"aux_1" | "aux_2" | "sound_fx" | "voice_fx", keyof LayoutState> = {
+    aux_1: "sourceAux1",
+    aux_2: "sourceAux2",
+    sound_fx: "sourceSfx",
+    voice_fx: "sourceVoiceFx",
+};
+
+function normalizeLayoutState(raw: unknown): LayoutState {
+    if (!raw || typeof raw !== "object") {
+        return { ...DEFAULT_LAYOUT };
+    }
+    const obj = raw as Record<string, unknown>;
+    const boolOr = (key: keyof LayoutState) =>
+        typeof obj[key] === "boolean" ? (obj[key] as boolean) : DEFAULT_LAYOUT[key];
+    return {
+        deckA: boolOr("deckA"),
+        deckB: boolOr("deckB"),
+        xfade: boolOr("xfade"),
+        sources: boolOr("sources"),
+        sourceAux1: boolOr("sourceAux1"),
+        sourceAux2: boolOr("sourceAux2"),
+        sourceSfx: boolOr("sourceSfx"),
+        sourceVoiceFx: boolOr("sourceVoiceFx"),
+        voiceStrip: boolOr("voiceStrip"),
+    };
+}
 
 
 export function MainWindow() {
@@ -45,13 +96,12 @@ export function MainWindow() {
     const [dspTarget, setDspTarget] = useState<PipelineTarget>(null);
 
     // ── Hideable-panel layout (persisted to localStorage) ─────────────────
-    type LayoutState = { deckA: boolean; deckB: boolean; xfade: boolean; sources: boolean };
     const [layout, setLayout] = useState<LayoutState>(() => {
         try {
             const saved = localStorage.getItem("dz-layout");
-            return saved ? JSON.parse(saved) : { deckA: true, deckB: true, xfade: true, sources: true };
+            return normalizeLayoutState(saved ? JSON.parse(saved) : null);
         } catch {
-            return { deckA: true, deckB: true, xfade: true, sources: true };
+            return { ...DEFAULT_LAYOUT };
         }
     });
     const [showLayoutMenu, setShowLayoutMenu] = useState(false);
@@ -62,6 +112,11 @@ export function MainWindow() {
 
     const toggleLayout = (key: keyof LayoutState) =>
         setLayout((l) => ({ ...l, [key]: !l[key] }));
+
+    const toggleSourceVisibility = (deck: "aux_1" | "aux_2" | "sound_fx" | "voice_fx") => {
+        const key = SOURCE_LAYOUT_KEY_BY_DECK[deck];
+        setLayout((l) => ({ ...l, [key]: !l[key] }));
+    };
 
     // Stream status
     useEffect(() => {
@@ -319,10 +374,15 @@ export function MainWindow() {
                             <span className="section-label" style={{ marginBottom: 2 }}>Visible Panels</span>
                             {(
                                 [
-                                    { key: "deckA",   label: "Deck A"    },
-                                    { key: "deckB",   label: "Deck B"    },
-                                    { key: "xfade",   label: "Crossfade" },
-                                    { key: "sources", label: "Sources"   },
+                                    { key: "deckA", label: "Deck A" },
+                                    { key: "deckB", label: "Deck B" },
+                                    { key: "xfade", label: "Crossfade" },
+                                    { key: "sources", label: "Sources Row" },
+                                    { key: "sourceAux1", label: "AUX 1" },
+                                    { key: "sourceAux2", label: "AUX 2" },
+                                    { key: "sourceSfx", label: "SFX" },
+                                    { key: "sourceVoiceFx", label: "Voice FX Deck" },
+                                    { key: "voiceStrip", label: "Voice Strip" },
                                 ] as { key: keyof LayoutState; label: string }[]
                             ).map(({ key, label }) => (
                                 <label
@@ -407,36 +467,49 @@ export function MainWindow() {
                     <div
                         style={{
                             display: "flex",
+                            flexDirection: "column",
                             gap: 10,
                             flexShrink: 0,
                         }}
                     >
-                        {layout.deckA && (
-                            <DeckPanel
-                                deckId="deck_a"
-                                label="DECK A"
-                                accentColor="#f59e0b"
-                                isOnAir={isOnAir}
-                                onCollapse={() => toggleLayout("deckA")}
-                            />
+                        {(layout.deckA || layout.deckB) && (
+                            <DeckWaveformStack showDeckA={layout.deckA} showDeckB={layout.deckB} />
                         )}
 
-                        {layout.xfade && layout.deckA && layout.deckB && (
-                            <CrossfadeBar
-                                deckA={{ label: "A" }}
-                                deckB={{ label: "B" }}
-                                onForceCrossfade={handleForceCrossfade}
-                            />
-                        )}
+                        <div
+                            style={{
+                                display: "flex",
+                                gap: 10,
+                                flexShrink: 0,
+                            }}
+                        >
+                            {layout.deckA && (
+                                <DeckPanel
+                                    deckId="deck_a"
+                                    label="DECK A"
+                                    accentColor="#f59e0b"
+                                    isOnAir={isOnAir}
+                                    onCollapse={() => toggleLayout("deckA")}
+                                />
+                            )}
 
-                        {layout.deckB && (
-                            <DeckPanel
-                                deckId="deck_b"
-                                label="DECK B"
-                                accentColor="#06b6d4"
-                                onCollapse={() => toggleLayout("deckB")}
-                            />
-                        )}
+                            {layout.xfade && layout.deckA && layout.deckB && (
+                                <CrossfadeBar
+                                    deckA={{ label: "A" }}
+                                    deckB={{ label: "B" }}
+                                    onForceCrossfade={handleForceCrossfade}
+                                />
+                            )}
+
+                            {layout.deckB && (
+                                <DeckPanel
+                                    deckId="deck_b"
+                                    label="DECK B"
+                                    accentColor="#06b6d4"
+                                    onCollapse={() => toggleLayout("deckB")}
+                                />
+                            )}
+                        </div>
                     </div>
                 ) : (
                     /* Restore bar — shown when both decks are hidden */
@@ -462,13 +535,34 @@ export function MainWindow() {
                     </div>
                 )}
 
-                <VoiceFXStrip
-                    onOpenSettings={() => setShowMicSettings(true)}
-                    onOpenVtRecorder={() => setShowVtRecorder(true)}
-                />
+                {layout.voiceStrip && (
+                    <VoiceFXStrip
+                        onOpenSettings={() => setShowMicSettings(true)}
+                        onOpenVtRecorder={() => setShowVtRecorder(true)}
+                    />
+                )}
 
                 {/* AUX / SFX / Voice row */}
-                {layout.sources && <SourceRow />}
+                {layout.sources && (
+                    <SourceRow
+                        visibleSourceIds={[
+                            ...(layout.sourceAux1 ? (["aux_1"] as const) : []),
+                            ...(layout.sourceAux2 ? (["aux_2"] as const) : []),
+                            ...(layout.sourceSfx ? (["sound_fx"] as const) : []),
+                            ...(layout.sourceVoiceFx ? (["voice_fx"] as const) : []),
+                        ]}
+                        onToggleSource={toggleSourceVisibility}
+                        onShowAllSources={() =>
+                            setLayout((l) => ({
+                                ...l,
+                                sourceAux1: true,
+                                sourceAux2: true,
+                                sourceSfx: true,
+                                sourceVoiceFx: true,
+                            }))
+                        }
+                    />
+                )}
 
                 {/* Bottom panel: Queue | Library | Requests | History | Logs */}
                 <BottomPanel />

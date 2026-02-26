@@ -48,6 +48,15 @@ pub async fn remove_from_queue(queue_id: i64, state: State<'_, AppState>) -> Res
         .map_err(|e| format!("DB error: {e}"))
 }
 
+#[tauri::command]
+pub async fn reorder_queue(queue_ids: Vec<i64>, state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.sam_db.read().await;
+    let pool = guard.as_ref().ok_or("SAM DB not connected")?;
+    sam::reorder_queue(pool, &queue_ids)
+        .await
+        .map_err(|e| format!("DB error: {e}"))
+}
+
 /// Mark a queue entry as completed: removes it from `queuelist` and writes a
 /// full metadata snapshot to `historylist`.  Replaces the old `mark_played` command.
 #[tauri::command]

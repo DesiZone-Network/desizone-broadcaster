@@ -7,6 +7,7 @@ use super::{
         MultibandConfig,
     },
     eq::{ChannelEQ, EqConfig},
+    stem_filter::{StemFilter, StemFilterConfig},
 };
 
 /// Complete per-channel DSP chain: EQ → AGC → MultibandComp → DualBandComp → Clipper
@@ -19,16 +20,19 @@ pub struct ChannelPipeline {
     pub multiband: MultibandCompressor,
     pub dual_band: DualBandCompressor,
     pub clipper: Clipper,
+    pub stem_filter: StemFilter,
 }
 
 /// Serializable settings snapshot — stored in SQLite `channel_dsp_settings`
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct PipelineSettings {
     pub eq: EqConfig,
     pub agc: AgcConfig,
     pub multiband: MultibandConfig,
     pub dual_band: DualBandConfig,
     pub clipper: ClipperConfig,
+    pub stem_filter: StemFilterConfig,
 }
 
 impl ChannelPipeline {
@@ -39,6 +43,7 @@ impl ChannelPipeline {
             multiband: MultibandCompressor::with_defaults(sample_rate),
             dual_band: DualBandCompressor::with_defaults(sample_rate),
             clipper: Clipper::new(ClipperConfig::default()),
+            stem_filter: StemFilter::new(StemFilterConfig::default()),
         }
     }
 
@@ -49,6 +54,7 @@ impl ChannelPipeline {
             multiband: MultibandCompressor::new(sample_rate, settings.multiband),
             dual_band: DualBandCompressor::new(sample_rate, settings.dual_band),
             clipper: Clipper::new(settings.clipper),
+            stem_filter: StemFilter::new(settings.stem_filter),
         }
     }
 
@@ -60,6 +66,7 @@ impl ChannelPipeline {
             multiband: self.multiband.config().clone(),
             dual_band: self.dual_band.config().clone(),
             clipper: self.clipper.config().clone(),
+            stem_filter: self.stem_filter.config().clone(),
         }
     }
 
@@ -82,6 +89,9 @@ impl ChannelPipeline {
 
         // 5. Hard clipper (last-resort ceiling)
         self.clipper.process_buffer(buf);
+
+        // 6. Optional vocal/instrumental stem-style filter.
+        self.stem_filter.process_buffer(buf);
     }
 }
 

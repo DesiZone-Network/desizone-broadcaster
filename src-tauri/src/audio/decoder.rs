@@ -5,6 +5,7 @@ use std::{
         Arc,
     },
     thread,
+    time::Duration,
 };
 
 use ringbuf::{
@@ -22,8 +23,8 @@ use symphonia::core::{
     units::Time,
 };
 
-/// Stereo f32 samples buffered ahead of the playback thread (~3 s at 44.1 kHz)
-const RING_CAPACITY: usize = 44100 * 2 * 3;
+/// Stereo f32 samples buffered ahead of the playback thread (~12 s at 44.1 kHz)
+const RING_CAPACITY: usize = 44100 * 2 * 12;
 
 /// Consumer-side handle owned by the audio render thread.
 pub struct DecoderHandle {
@@ -259,7 +260,7 @@ fn push_decoded(
                         let _ = producer.try_push(r);
                         break;
                     }
-                    thread::yield_now();
+                    thread::sleep(Duration::from_micros(250));
                 }
                 written += 1;
             }
@@ -287,7 +288,7 @@ fn push_decoded(
                         let _ = producer.try_push(r);
                         break;
                     }
-                    thread::yield_now();
+                    thread::sleep(Duration::from_micros(250));
                 }
                 written += 1;
             }
@@ -313,7 +314,7 @@ fn push_decoded(
                         let _ = producer.try_push(r);
                         break;
                     }
-                    thread::yield_now();
+                    thread::sleep(Duration::from_micros(250));
                 }
                 written += 1;
             }

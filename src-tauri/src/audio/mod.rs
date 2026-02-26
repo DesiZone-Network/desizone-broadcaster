@@ -1,3 +1,4 @@
+pub mod analyzer;
 pub mod crossfade;
 pub mod deck;
 pub mod decoder;

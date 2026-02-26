@@ -66,6 +66,7 @@ pub struct Deck {
     // Linear interpolation between two adjacent source frames.
     /// Fractional position within the current source-frame pair [0.0, 1.0)
     resample_phase: f64,
+    resample_seeded: bool,
     resample_prev_l: f32,
     resample_prev_r: f32,
     resample_next_l: f32,
@@ -79,6 +80,7 @@ pub struct Deck {
     swap_out_total_frames: u32,
     swap_out_remaining_frames: u32,
     pending_swap: Option<PendingSwap>,
+    loop_state: Option<LoopState>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,8 +111,20 @@ struct PendingSwap {
     op: AttachOp,
 }
 
+struct LoopState {
+    start_frame: u64,
+    end_frame: u64,
+    cached_frames: u64,
+    play_frame: u64,
+    playing_from_buffer: bool,
+    buffer: Vec<f32>,
+}
+
 const SWAP_OUT_MS: u64 = 10;
 const SWAP_PREROLL_MS: u64 = 20;
+const MAX_LOOP_SECONDS: u64 = 64;
+const LOOP_WRAP_MIN_XFADE_FRAMES: u64 = 24;
+const LOOP_WRAP_MAX_XFADE_FRAMES: u64 = 160;
 
 impl Deck {
     pub fn new(id: DeckId) -> Self {
@@ -135,6 +149,7 @@ impl Deck {
             ended_naturally: false,
             completion_pending: None,
             resample_phase: 0.0,
+            resample_seeded: false,
             resample_prev_l: 0.0,
             resample_prev_r: 0.0,
             resample_next_l: 0.0,
@@ -147,6 +162,7 @@ impl Deck {
             swap_out_total_frames: 0,
             swap_out_remaining_frames: 0,
             pending_swap: None,
+            loop_state: None,
         }
     }
 
@@ -222,6 +238,7 @@ impl Deck {
         self.reset_resampler();
         self.reset_play_ramp();
         self.reset_swap_state();
+        self.clear_loop();
 
         let handle = spawn_decoder(path, None)?;
         self.sample_rate = handle.sample_rate;
@@ -277,6 +294,7 @@ impl Deck {
         self.queue_id = None;
         self.from_rotation = false;
         self.declared_duration_ms = None;
+        self.clear_loop();
         self.reset_resampler();
         self.reset_play_ramp();
         self.reset_swap_state();
@@ -301,6 +319,46 @@ impl Deck {
     pub fn set_tempo_pct(&mut self, pct: f32) {
         self.tempo_pct = pct.clamp(-50.0, 50.0);
         self.playback_rate = (1.0 + self.tempo_pct / 100.0).clamp(0.5, 1.5);
+    }
+
+    pub fn set_loop_range_ms(&mut self, start_ms: u64, end_ms: u64) -> Result<(), String> {
+        if self.sample_rate == 0 {
+            return Err("Invalid sample rate for loop".to_string());
+        }
+        if end_ms <= start_ms + 10 {
+            return Err("Loop end must be greater than loop start".to_string());
+        }
+        let start_frame = start_ms.saturating_mul(self.sample_rate as u64) / 1000;
+        let end_frame = end_ms.saturating_mul(self.sample_rate as u64) / 1000;
+        if end_frame <= start_frame + 16 {
+            return Err("Loop range too short".to_string());
+        }
+        let loop_frames = end_frame.saturating_sub(start_frame);
+        let max_frames = self.sample_rate as u64 * MAX_LOOP_SECONDS;
+        if loop_frames > max_frames {
+            return Err(format!("Loop too long (max {MAX_LOOP_SECONDS}s)"));
+        }
+        let sample_len = loop_frames.saturating_mul(2).min(usize::MAX as u64) as usize;
+        self.loop_state = Some(LoopState {
+            start_frame,
+            end_frame,
+            cached_frames: 0,
+            play_frame: 0,
+            playing_from_buffer: false,
+            buffer: vec![0.0; sample_len],
+        });
+        Ok(())
+    }
+
+    pub fn clear_loop(&mut self) {
+        if let Some(loop_state) = self.loop_state.take() {
+            if loop_state.playing_from_buffer {
+                self.frames_consumed = loop_state.end_frame;
+                if matches!(self.state, DeckState::Playing | DeckState::Crossfading) {
+                    self.arm_play_ramp_ms(4);
+                }
+            }
+        }
     }
 
     pub fn stop_with_completion(&mut self) {
@@ -421,10 +479,16 @@ impl Deck {
 
         use ringbuf::traits::Consumer as _;
 
-        if file_sr == device_sr || file_sr == 0 || device_sr == 0 {
+        let use_fast_path = (file_sr == device_sr || file_sr == 0 || device_sr == 0)
+            && (self.playback_rate - 1.0).abs() < 1e-6;
+
+        if use_fast_path {
             // ── Fast path: rates match, direct copy ──────────────────────
+            // Reset any prior resampler state so switching back to non-1.0
+            // playback starts from the current decoder position.
+            self.resample_seeded = false;
+            self.resample_phase = 0.0;
             let mut out_i = 0usize;
-            let mut popped_frames = 0usize;
             while out_i < output.len() {
                 if self.swap_out_total_frames > 0
                     && self.swap_out_remaining_frames == 0
@@ -432,7 +496,9 @@ impl Deck {
                 {
                     self.apply_pending_swap();
                 }
-                let pair = {
+                let pair = if let Some(loop_pair) = self.next_loop_buffer_frame() {
+                    Some(loop_pair)
+                } else {
                     let decoder = self.decoder.as_mut().unwrap();
                     if decoder.consumer.occupied_len() < 2 {
                         None
@@ -447,6 +513,15 @@ impl Deck {
                     output[out_i..].fill(0.0);
                     break;
                 };
+                if !self
+                    .loop_state
+                    .as_ref()
+                    .is_some_and(|s| s.playing_from_buffer)
+                {
+                    let frame_index = self.frames_consumed;
+                    self.frames_consumed = self.frames_consumed.saturating_add(1);
+                    self.capture_loop_frame(frame_index, l, r);
+                }
                 let start_gain = self.next_play_ramp_gain();
                 let swap_gain = self.next_swap_out_gain();
                 let gain = self.channel_gain * self.xfade_gain * start_gain * swap_gain;
@@ -457,9 +532,7 @@ impl Deck {
                 rms_sum_sq += l64 * l64 + r64 * r64;
                 rms_samples += 2;
                 out_i += 2;
-                popped_frames += 1;
             }
-            self.frames_consumed += popped_frames as u64;
         } else {
             // ── Resampling path: linear interpolation ────────────────────
             //
@@ -472,6 +545,33 @@ impl Deck {
             // Example: file=44100, device=48000 → ratio≈0.919
             //   Each output frame advances phase by 0.919; a new source frame
             //   is consumed roughly every 1.088 output frames.
+            if !self.resample_seeded {
+                let seeded = {
+                    let decoder = self.decoder.as_mut().unwrap();
+                    if decoder.consumer.occupied_len() >= 4 {
+                        let l0 = decoder.consumer.try_pop().unwrap_or(0.0);
+                        let r0 = decoder.consumer.try_pop().unwrap_or(0.0);
+                        let l1 = decoder.consumer.try_pop().unwrap_or(0.0);
+                        let r1 = decoder.consumer.try_pop().unwrap_or(0.0);
+                        Some((l0, r0, l1, r1))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((l0, r0, l1, r1)) = seeded {
+                    self.resample_prev_l = l0;
+                    self.resample_prev_r = r0;
+                    self.resample_next_l = l1;
+                    self.resample_next_r = r1;
+                    self.resample_phase = 0.0;
+                    self.resample_seeded = true;
+                } else {
+                    output.fill(0.0);
+                    self.rms_db_pre_fader = -96.0;
+                    return;
+                }
+            }
+
             let ratio = file_sr as f64 * self.playback_rate as f64 / device_sr as f64;
 
             for out_i in 0..out_frames {
@@ -552,6 +652,7 @@ impl Deck {
     /// we don't carry stale samples from a previous track into the new one.
     fn reset_resampler(&mut self) {
         self.resample_phase = 0.0;
+        self.resample_seeded = false;
         self.resample_prev_l = 0.0;
         self.resample_prev_r = 0.0;
         self.resample_next_l = 0.0;
@@ -559,6 +660,7 @@ impl Deck {
     }
 
     fn apply_prepared(&mut self, prepared: PreparedTrack, op: AttachOp) {
+        let was_paused = self.state == DeckState::Paused;
         self.stop_decoder();
         self.decoder = Some(prepared.decoder);
         self.file_path = Some(prepared.file_path);
@@ -578,10 +680,21 @@ impl Deck {
         self.swap_out_armed = false;
         self.swap_out_total_frames = 0;
         self.swap_out_remaining_frames = 0;
+        if matches!(op, AttachOp::Load) {
+            self.clear_loop();
+            // Fresh track loads should not inherit old transport offsets.
+            self.pitch_pct = 0.0;
+            self.tempo_pct = 0.0;
+            self.playback_rate = 1.0;
+        }
 
         if matches!(self.state, DeckState::Playing | DeckState::Crossfading) {
             self.paused = false;
             self.arm_play_ramp_ms(12);
+        } else if was_paused && matches!(op, AttachOp::Seek) {
+            self.paused = true;
+            self.state = DeckState::Paused;
+            self.reset_play_ramp();
         } else {
             self.paused = false;
             self.state = DeckState::Ready;
@@ -700,6 +813,80 @@ impl Deck {
             .clamp(0.0, 1.0);
         self.swap_out_remaining_frames -= 1;
         gain
+    }
+
+    fn capture_loop_frame(&mut self, frame_index: u64, l: f32, r: f32) {
+        let Some(loop_state) = self.loop_state.as_mut() else {
+            return;
+        };
+        if loop_state.playing_from_buffer {
+            return;
+        }
+        if frame_index < loop_state.start_frame || frame_index >= loop_state.end_frame {
+            return;
+        }
+        let rel = frame_index.saturating_sub(loop_state.start_frame);
+        let idx = rel.saturating_mul(2) as usize;
+        if idx + 1 < loop_state.buffer.len() {
+            loop_state.buffer[idx] = l;
+            loop_state.buffer[idx + 1] = r;
+            loop_state.cached_frames = loop_state.cached_frames.max(rel + 1);
+        }
+        if frame_index + 1 >= loop_state.end_frame && loop_state.cached_frames >= 2 {
+            loop_state.playing_from_buffer = true;
+            loop_state.play_frame = 0;
+            self.frames_consumed = loop_state.start_frame;
+        }
+    }
+
+    fn next_loop_buffer_frame(&mut self) -> Option<(f32, f32)> {
+        let sr = self.sample_rate.max(1) as u64;
+        let loop_state = self.loop_state.as_mut()?;
+        if !loop_state.playing_from_buffer || loop_state.cached_frames == 0 {
+            return None;
+        }
+        let len = loop_state.cached_frames;
+        let play = loop_state.play_frame % len;
+        let target_wrap_blend = (sr.saturating_mul(3) / 1000)
+            .clamp(LOOP_WRAP_MIN_XFADE_FRAMES, LOOP_WRAP_MAX_XFADE_FRAMES);
+        let wrap_blend = target_wrap_blend
+            .min(len.saturating_sub(1))
+            .min((len / 4).max(1));
+        let idx = play.saturating_mul(2) as usize;
+        if idx + 1 >= loop_state.buffer.len() {
+            return None;
+        }
+        let mut l = loop_state.buffer[idx];
+        let mut r = loop_state.buffer[idx + 1];
+        // Crossfade tail->head across a short region to smooth the loop seam.
+        // After wrapping, skip already blended head frames to avoid replaying
+        // the same transient twice at the boundary.
+        if play >= len.saturating_sub(wrap_blend) && wrap_blend > 0 {
+            let blend_pos = play.saturating_sub(len.saturating_sub(wrap_blend));
+            let head_idx = blend_pos.saturating_mul(2) as usize;
+            if head_idx + 1 < loop_state.buffer.len() {
+                let t = blend_pos as f32 / wrap_blend as f32;
+                let theta = t * std::f32::consts::FRAC_PI_2;
+                let w_tail = theta.cos();
+                let w_head = theta.sin();
+                let hl = loop_state.buffer[head_idx];
+                let hr = loop_state.buffer[head_idx + 1];
+                l = l * w_tail + hl * w_head;
+                r = r * w_tail + hr * w_head;
+            }
+        }
+        self.frames_consumed = loop_state.start_frame + play;
+        let next_play = play + 1;
+        loop_state.play_frame = if next_play >= len {
+            if wrap_blend > 0 {
+                wrap_blend % len
+            } else {
+                0
+            }
+        } else {
+            next_play
+        };
+        Some((l, r))
     }
 }
 
