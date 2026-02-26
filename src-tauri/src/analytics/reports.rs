@@ -1,7 +1,8 @@
 use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{MySqlPool, Row, SqlitePool};
-use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,12 +202,12 @@ async fn generate_listener_trend_report(
     now_ms: i64,
     period_days: i32,
 ) -> Result<ReportData, sqlx::Error> {
-    let cutoff_ms = now_ms - (period_days.max(1) as i64 * 24 * 60 * 60 * 1000);
+    let cutoff_s = now_ms / 1000 - (period_days.max(1) as i64 * 24 * 60 * 60);
 
     let summary_row = sqlx::query(
-        "SELECT COALESCE(MAX(listener_count), 0) AS peak, COALESCE(AVG(listener_count), 0.0) AS avg_count FROM listener_snapshots WHERE timestamp >= ?",
+        "SELECT COALESCE(MAX(current_listeners), 0) AS peak, COALESCE(AVG(current_listeners), 0.0) AS avg_count FROM listener_snapshots WHERE snapshot_at >= ?",
     )
-    .bind(cutoff_ms)
+    .bind(cutoff_s)
     .fetch_one(pool)
     .await?;
 
@@ -214,9 +215,9 @@ async fn generate_listener_trend_report(
     let average: f64 = summary_row.get("avg_count");
 
     let trend_rows = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT timestamp, listener_count FROM listener_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 500",
+        "SELECT snapshot_at, current_listeners FROM listener_snapshots WHERE snapshot_at >= ? ORDER BY snapshot_at ASC LIMIT 500",
     )
-    .bind(cutoff_ms)
+    .bind(cutoff_s)
     .fetch_all(pool)
     .await?;
 
@@ -447,7 +448,13 @@ pub fn export_report_csv(report_data: &ReportData) -> Result<String, String> {
         ));
     }
 
-    fs::write(&path, csv_content).map_err(|e| e.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(csv_content.as_bytes())
+        .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -470,7 +477,11 @@ fn parse_date_window_seconds(start_date: &str, end_date: &str) -> (i64, i64) {
         .map(|dt| dt.and_utc().timestamp())
         .unwrap_or(i64::MAX);
 
-    (start_s, end_s)
+    if end_s < start_s {
+        (end_s, start_s)
+    } else {
+        (start_s, end_s)
+    }
 }
 
 #[cfg(test)]
