@@ -74,7 +74,15 @@ pub async fn complete_queue_item(
         .map_err(|e| format!("DB error fetching song: {e}"))?
         .ok_or_else(|| format!("Song {song_id} not found in SAM DB"))?;
 
-    sam::complete_track(pool, queue_id, &song)
+    let listeners_total: i64 = state
+        .encoder_manager
+        .get_all_runtime()
+        .iter()
+        .map(|r| r.listeners.unwrap_or(0) as i64)
+        .sum();
+    let listener_snapshot = listeners_total.clamp(0, i32::MAX as i64) as i32;
+
+    sam::complete_track(pool, queue_id, &song, listener_snapshot)
         .await
         .map_err(|e| format!("DB error completing track: {e}"))
 }

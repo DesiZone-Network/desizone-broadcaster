@@ -81,6 +81,38 @@ pub async fn seek_deck(
 }
 
 #[tauri::command]
+pub async fn jog_deck(
+    deck: String,
+    delta_steps: i8,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    if delta_steps == 0 {
+        return Ok(());
+    }
+
+    let deck_state = { state.engine.lock().unwrap().get_deck_state(deck_id) };
+    let Some(deck_state) = deck_state else {
+        return Ok(());
+    };
+    if deck_state.duration_ms == 0 {
+        return Ok(());
+    }
+
+    let clamped_steps = delta_steps.clamp(-12, 12) as i64;
+    let step_ms: i64 = if deck_state.state == "playing" || deck_state.state == "crossfading" {
+        25
+    } else {
+        150
+    };
+    let position = deck_state.position_ms as i64;
+    let duration = deck_state.duration_ms as i64;
+    let target = (position + (clamped_steps * step_ms)).clamp(0, duration) as u64;
+
+    state.engine.lock().unwrap().seek(deck_id, target)
+}
+
+#[tauri::command]
 pub async fn set_channel_gain(
     deck: String,
     gain: f32,
@@ -88,6 +120,36 @@ pub async fn set_channel_gain(
 ) -> Result<(), String> {
     let deck_id = parse_deck(&deck)?;
     state.engine.lock().unwrap().set_channel_gain(deck_id, gain)
+}
+
+#[tauri::command]
+pub async fn set_deck_bass(
+    deck: String,
+    bass_db: f32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state.engine.lock().unwrap().set_deck_bass(deck_id, bass_db)
+}
+
+#[tauri::command]
+pub async fn set_deck_filter(
+    deck: String,
+    amount: f32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state.engine.lock().unwrap().set_deck_filter(deck_id, amount)
+}
+
+#[tauri::command]
+pub async fn set_master_level(level: f32, state: State<'_, AppState>) -> Result<(), String> {
+    state.engine.lock().unwrap().set_master_level(level)
+}
+
+#[tauri::command]
+pub async fn get_master_level(state: State<'_, AppState>) -> Result<f32, String> {
+    Ok(state.engine.lock().unwrap().get_master_level())
 }
 
 #[tauri::command]
@@ -136,7 +198,13 @@ pub async fn set_deck_loop(
 #[tauri::command]
 pub async fn clear_deck_loop(deck: String, state: State<'_, AppState>) -> Result<(), String> {
     let deck_id = parse_deck(&deck)?;
-    state.engine.lock().unwrap().clear_deck_loop(deck_id)
+    let mut engine = state.engine.lock().unwrap();
+    let current_pos = engine.get_deck_state(deck_id).map(|s| s.position_ms);
+    engine.clear_deck_loop(deck_id)?;
+    if let Some(position_ms) = current_pos {
+        let _ = engine.seek(deck_id, position_ms);
+    }
+    Ok(())
 }
 
 #[tauri::command]

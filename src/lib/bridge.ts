@@ -53,9 +53,16 @@ export interface DeckStateEvent {
   playback_rate?: number;
   pitch_pct?: number;
   tempo_pct?: number;
+  channel_gain?: number;
+  bass_db?: number;
+  filter_amount?: number;
+  master_level?: number;
   decoder_buffer_ms: number;
   rms_db_pre_fader: number;
   cue_preview_enabled?: boolean;
+  loop_enabled?: boolean;
+  loop_start_ms?: number | null;
+  loop_end_ms?: number | null;
 }
 
 export interface VuEvent {
@@ -68,6 +75,14 @@ export interface CrossfadeProgressEvent {
   progress: number;
   outgoing_deck: DeckId;
   incoming_deck: DeckId;
+}
+
+export interface ManualCrossfadeChangedEvent {
+  position: number;
+}
+
+export interface MasterVolumeChangedEvent {
+  level: number;
 }
 
 export interface CuePoint {
@@ -135,6 +150,35 @@ export interface MonitorRoutingConfig {
   cue_mix_mode: string;
   cue_level: number;
   master_level: number;
+}
+
+export interface ControllerDevice {
+  id: string;
+  name: string;
+  is_starlight_candidate: boolean;
+  connected: boolean;
+}
+
+export interface ControllerConfig {
+  enabled: boolean;
+  auto_connect: boolean;
+  preferred_device_id: string | null;
+  profile: string;
+}
+
+export interface ControllerStatus {
+  enabled: boolean;
+  connected: boolean;
+  active_device_id: string | null;
+  active_device_name: string | null;
+  profile: string;
+  last_error: string | null;
+  last_event_at: number | null;
+}
+
+export interface ControllerErrorEvent {
+  message: string;
+  timestamp: number;
 }
 
 export interface SamSong {
@@ -279,14 +323,29 @@ export const nextDeck = (deck: DeckId) => invoke<void>("next_deck", { deck });
 export const seekDeck = (deck: DeckId, positionMs: number) =>
   invoke<void>("seek_deck", { deck, positionMs });
 
+export const jogDeck = (deck: DeckId, deltaSteps: number) =>
+  invoke<void>("jog_deck", { deck, deltaSteps });
+
 export const setChannelGain = (deck: DeckId, gain: number) =>
   invoke<void>("set_channel_gain", { deck, gain });
+
+export const setDeckBass = (deck: DeckId, bassDb: number) =>
+  invoke<void>("set_deck_bass", { deck, bassDb });
+
+export const setDeckFilter = (deck: DeckId, amount: number) =>
+  invoke<void>("set_deck_filter", { deck, amount });
 
 export const setDeckPitch = (deck: DeckId, pitchPct: number) =>
   invoke<void>("set_deck_pitch", { deck, pitchPct });
 
 export const setDeckTempo = (deck: DeckId, tempoPct: number) =>
   invoke<void>("set_deck_tempo", { deck, tempoPct });
+
+export const setMasterLevel = (level: number) =>
+  invoke<void>("set_master_level", { level });
+
+export const getMasterLevel = () =>
+  invoke<number>("get_master_level");
 
 export const setDeckLoop = (deck: DeckId, startMs: number, endMs: number) =>
   invoke<void>("set_deck_loop", { deck, startMs, endMs });
@@ -469,6 +528,26 @@ export const setMonitorRoutingConfig = (config: MonitorRoutingConfig) =>
 export const setDeckCuePreviewEnabled = (deck: DeckId, enabled: boolean) =>
   invoke<void>("set_deck_cue_preview_enabled", { deck, enabled });
 
+// ── Controller ───────────────────────────────────────────────────────────────
+
+export const listControllerDevices = () =>
+  invoke<ControllerDevice[]>("list_controller_devices");
+
+export const getControllerStatus = () =>
+  invoke<ControllerStatus>("get_controller_status");
+
+export const getControllerConfig = () =>
+  invoke<ControllerConfig>("get_controller_config");
+
+export const saveControllerConfig = (config: ControllerConfig) =>
+  invoke<void>("save_controller_config_cmd", { config });
+
+export const connectController = (deviceId?: string | null) =>
+  invoke<ControllerStatus>("connect_controller", { deviceId: deviceId ?? null });
+
+export const disconnectController = () =>
+  invoke<ControllerStatus>("disconnect_controller");
+
 // ── Queue / SAM ──────────────────────────────────────────────────────────────
 
 export const getQueue = () => invoke<QueueEntry[]>("get_queue");
@@ -638,6 +717,16 @@ export const onCrossfadeProgress = (
 ): Promise<UnlistenFn> =>
   listen<CrossfadeProgressEvent>("crossfade_progress", (e) => cb(e.payload));
 
+export const onManualCrossfadeChanged = (
+  cb: (event: ManualCrossfadeChangedEvent) => void
+): Promise<UnlistenFn> =>
+  listen<ManualCrossfadeChangedEvent>("manual_crossfade_changed", (e) => cb(e.payload));
+
+export const onMasterVolumeChanged = (
+  cb: (event: MasterVolumeChangedEvent) => void
+): Promise<UnlistenFn> =>
+  listen<MasterVolumeChangedEvent>("master_volume_changed", (e) => cb(e.payload));
+
 export const onVuMeter = (
   cb: (event: VuEvent) => void
 ): Promise<UnlistenFn> => listen<VuEvent>("vu_meter", (e) => cb(e.payload));
@@ -715,6 +804,16 @@ export const onPlayheadUpdate = (
 export const onQueueUpdated = (
   cb: () => void
 ): Promise<UnlistenFn> => listen("queue_updated", () => cb());
+
+export const onControllerStatusChanged = (
+  cb: (status: ControllerStatus) => void
+): Promise<UnlistenFn> =>
+  listen<ControllerStatus>("controller_status_changed", (e) => cb(e.payload));
+
+export const onControllerError = (
+  cb: (event: ControllerErrorEvent) => void
+): Promise<UnlistenFn> =>
+  listen<ControllerErrorEvent>("controller_error", (e) => cb(e.payload));
 
 export const onRequestReceived = (
   cb: (request: RequestItem) => void

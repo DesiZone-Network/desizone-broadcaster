@@ -218,12 +218,12 @@ fn append_filters(
 ) {
     if let Some(level) = level.filter(|value| !value.trim().is_empty()) {
         query_builder.push(" AND level = ");
-        query_builder.push_bind(level.trim());
+        query_builder.push_bind(level.trim().to_string());
     }
 
     if let Some(category) = category.filter(|value| !value.trim().is_empty()) {
         query_builder.push(" AND category = ");
-        query_builder.push_bind(category.trim());
+        query_builder.push_bind(category.trim().to_string());
     }
 
     if let Some(start_time) = start_time {
@@ -238,7 +238,7 @@ fn append_filters(
 
     if let Some(deck) = deck.filter(|value| !value.trim().is_empty()) {
         query_builder.push(" AND deck = ");
-        query_builder.push_bind(deck.trim());
+        query_builder.push_bind(deck.trim().to_string());
     }
 
     if let Some(search) = search.filter(|value| !value.trim().is_empty()) {

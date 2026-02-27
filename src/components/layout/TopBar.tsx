@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { Wifi, WifiOff, Radio } from "lucide-react";
-import { getDjMode, onDjModeChanged, onVuMeter, VuEvent, type DjMode } from "../../lib/bridge";
+import {
+  getMasterLevel,
+  getDjMode,
+  getEncoderRuntime,
+  onMasterVolumeChanged,
+  onDjModeChanged,
+  onEncoderStatusChanged,
+  onListenerCountUpdated,
+  onVuMeter,
+  setMasterLevel,
+  VuEvent,
+  type DjMode,
+} from "../../lib/bridge";
 
 interface Props {
   stationName?: string;
@@ -80,7 +92,9 @@ function Clock() {
 
 export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamConnected }: Props) {
   const [masterVu, setMasterVu] = useState<VuEvent | null>(null);
+  const [masterLevel, setMasterLevelState] = useState(1);
   const [djMode, setDjMode] = useState<DjMode>("manual");
+  const [listenerTotal, setListenerTotal] = useState<number | null>(null);
 
   useEffect(() => {
     const unsub = onVuMeter((e) => {
@@ -89,6 +103,16 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
       }
     });
     return () => { unsub.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    getMasterLevel().then((level) => setMasterLevelState(level)).catch(() => {});
+    const off = onMasterVolumeChanged((event) => {
+      setMasterLevelState(event.level);
+    });
+    return () => {
+      off.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   useEffect(() => {
@@ -103,6 +127,33 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    const refreshListeners = () => {
+      getEncoderRuntime()
+        .then((runtime) => {
+          if (disposed) return;
+          const total = runtime.reduce((sum, item) => sum + (item.listeners ?? 0), 0);
+          setListenerTotal(total);
+        })
+        .catch(() => {
+          if (!disposed) setListenerTotal(null);
+        });
+    };
+
+    refreshListeners();
+    const countTimer = setInterval(refreshListeners, 15000);
+    const offStatus = onEncoderStatusChanged(() => refreshListeners());
+    const offCount = onListenerCountUpdated(() => refreshListeners());
+
+    return () => {
+      disposed = true;
+      clearInterval(countTimer);
+      offStatus.then((fn) => fn());
+      offCount.then((fn) => fn());
+    };
+  }, []);
+
   const modeLabel = djMode === "autodj" ? "AUTODJ" : djMode === "assisted" ? "ASSISTED" : "MANUAL";
   const modeStyle =
     djMode === "autodj"
@@ -110,6 +161,12 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
       : djMode === "assisted"
       ? { background: "var(--amber-glow)", border: "1px solid var(--amber-dim)", color: "var(--amber)" }
       : { background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--text-muted)" };
+
+  const handleMasterLevelChange = (next: number) => {
+    const clamped = Math.max(0, Math.min(1, next));
+    setMasterLevelState(clamped);
+    setMasterLevel(clamped).catch(() => {});
+  };
 
   return (
     <header
@@ -161,6 +218,17 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
           {streamConnected ? "STREAMING" : "NO STREAM"}
         </div>
 
+        <div
+          className="badge"
+          style={{
+            background: "rgba(6,182,212,.12)",
+            border: "1px solid rgba(6,182,212,.45)",
+            color: "var(--cyan)",
+          }}
+        >
+          LISTENERS {listenerTotal ?? 0}
+        </div>
+
         <div className="badge" style={modeStyle}>
           {modeLabel}
         </div>
@@ -168,6 +236,19 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
 
       {/* Right: VU + Clock */}
       <div className="flex items-center gap-5">
+        <div className="flex flex-col items-end" style={{ minWidth: 120 }}>
+          <span className="mono text-muted" style={{ fontSize: 9, letterSpacing: "0.08em" }}>MASTER</span>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={masterLevel}
+            onChange={(e) => handleMasterLevelChange(parseFloat(e.target.value))}
+            style={{ width: 110, accentColor: "var(--amber)" }}
+          />
+          <span className="mono text-muted" style={{ fontSize: 9 }}>{Math.round(masterLevel * 100)}%</span>
+        </div>
         <MasterVU vuData={masterVu} />
         <Clock />
       </div>

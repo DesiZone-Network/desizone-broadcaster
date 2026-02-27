@@ -1,6 +1,7 @@
 pub mod analytics_commands;
 pub mod audio_commands;
 pub mod beatgrid_commands;
+pub mod controller_commands;
 pub mod crossfade_commands;
 pub mod cue_commands;
 pub mod dsp_commands;

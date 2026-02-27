@@ -202,12 +202,12 @@ async fn generate_listener_trend_report(
     now_ms: i64,
     period_days: i32,
 ) -> Result<ReportData, sqlx::Error> {
-    let cutoff_s = now_ms / 1000 - (period_days.max(1) as i64 * 24 * 60 * 60);
+    let cutoff_ms = now_ms - (period_days.max(1) as i64 * 24 * 60 * 60 * 1000);
 
     let summary_row = sqlx::query(
-        "SELECT COALESCE(MAX(current_listeners), 0) AS peak, COALESCE(AVG(current_listeners), 0.0) AS avg_count FROM listener_snapshots WHERE snapshot_at >= ?",
+        "SELECT COALESCE(MAX(listener_count), 0) AS peak, COALESCE(AVG(listener_count), 0.0) AS avg_count FROM listener_snapshots WHERE timestamp >= ?",
     )
-    .bind(cutoff_s)
+    .bind(cutoff_ms)
     .fetch_one(pool)
     .await?;
 
@@ -215,9 +215,9 @@ async fn generate_listener_trend_report(
     let average: f64 = summary_row.get("avg_count");
 
     let trend_rows = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT snapshot_at, current_listeners FROM listener_snapshots WHERE snapshot_at >= ? ORDER BY snapshot_at ASC LIMIT 500",
+        "SELECT timestamp, listener_count FROM listener_snapshots WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 500",
     )
-    .bind(cutoff_s)
+    .bind(cutoff_ms)
     .fetch_all(pool)
     .await?;
 

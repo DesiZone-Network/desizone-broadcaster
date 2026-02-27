@@ -18,6 +18,7 @@ import {
     onDeckStateChanged,
 } from "../../lib/bridge";
 import type { SamSong, SamCategory } from "../../lib/bridge";
+import { resolveAlbumArtUrl } from "../../lib/albumArt";
 import { serializeSongDragPayload } from "../../lib/songDrag";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -378,6 +379,7 @@ function EditSongDialog({
 }) {
     const [saving, setSaving] = useState(false);
     const [saveError, setSaveError] = useState<string | null>(null);
+    const [albumArtLoadFailed, setAlbumArtLoadFailed] = useState(false);
 
     // Editable fields mirroring SongUpdateFields
     const [artist,    setArtist]    = useState(song.artist ?? "");
@@ -410,11 +412,11 @@ function EditSongDialog({
 
     const spotifyTrackId = extractSpotifyTrackId(spotifyId);
     const parsedXfade = parseXfadeOverride(xfade);
-    const albumArtSrc = song.picture
-        ? (song.picture.startsWith("data:") || song.picture.startsWith("http")
-            ? song.picture
-            : `file://${song.picture.replace(/\\/g, "/")}`)
-        : null;
+    const albumArtSrc = resolveAlbumArtUrl(song.picture);
+
+    useEffect(() => {
+        setAlbumArtLoadFailed(false);
+    }, [song.id, song.picture]);
 
     const handleSave = async () => {
         setSaving(true);
@@ -499,24 +501,40 @@ function EditSongDialog({
                 </div>
 
                 {/* Fields */}
-                {(albumArtSrc || song.picture) && (
-                    <FieldRow label="Album Art">
-                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            {albumArtSrc ? (
-                                <img
-                                    src={albumArtSrc}
-                                    alt="Album art"
-                                    style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border-strong)" }}
-                                />
-                            ) : (
-                                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Album art exists in metadata but could not be previewed.</div>
-                            )}
-                            <div className="mono" style={{ fontSize: 10, color: "var(--text-muted)", wordBreak: "break-all" }}>
-                                {song.picture}
+                <FieldRow label="Album Art">
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        {albumArtSrc && !albumArtLoadFailed ? (
+                            <img
+                                src={albumArtSrc}
+                                alt="Album art"
+                                onError={() => setAlbumArtLoadFailed(true)}
+                                style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border-strong)" }}
+                            />
+                        ) : (
+                            <div
+                                style={{
+                                    width: 72,
+                                    height: 72,
+                                    borderRadius: 6,
+                                    border: "1px solid var(--border-strong)",
+                                    background: "var(--bg-input)",
+                                    color: "var(--text-muted)",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: 10,
+                                    textAlign: "center",
+                                    padding: 6,
+                                }}
+                            >
+                                No Album Art
                             </div>
+                        )}
+                        <div className="mono" style={{ fontSize: 10, color: "var(--text-muted)", wordBreak: "break-all" }}>
+                            {song.picture || "(empty)"}
                         </div>
-                    </FieldRow>
-                )}
+                    </div>
+                </FieldRow>
                 <FieldRow label="Title">
                     <input style={inp} value={title} onChange={e => setTitle(e.target.value)} />
                 </FieldRow>

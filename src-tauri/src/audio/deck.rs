@@ -361,6 +361,17 @@ impl Deck {
         }
     }
 
+    pub fn loop_range_ms(&self) -> Option<(u64, u64)> {
+        let loop_state = self.loop_state.as_ref()?;
+        if self.sample_rate == 0 {
+            return None;
+        }
+        let sr = self.sample_rate as u64;
+        let start_ms = loop_state.start_frame.saturating_mul(1000) / sr;
+        let end_ms = loop_state.end_frame.saturating_mul(1000) / sr;
+        Some((start_ms, end_ms))
+    }
+
     pub fn stop_with_completion(&mut self) {
         let completion = self.song_id.map(|song_id| TrackCompletion {
             song_id,
@@ -607,7 +618,14 @@ impl Deck {
                     self.resample_prev_l = self.resample_next_l;
                     self.resample_prev_r = self.resample_next_r;
 
-                    let next_pair = {
+                    let loop_playing = self
+                        .loop_state
+                        .as_ref()
+                        .is_some_and(|s| s.playing_from_buffer);
+
+                    let next_pair = if loop_playing {
+                        self.next_loop_buffer_frame()
+                    } else {
                         let decoder = self.decoder.as_mut().unwrap();
                         if decoder.consumer.occupied_len() >= 2 {
                             Some((
@@ -621,7 +639,11 @@ impl Deck {
                     if let Some((next_l, next_r)) = next_pair {
                         self.resample_next_l = next_l;
                         self.resample_next_r = next_r;
-                        self.frames_consumed += 1;
+                        if !loop_playing {
+                            let frame_index = self.frames_consumed;
+                            self.frames_consumed = self.frames_consumed.saturating_add(1);
+                            self.capture_loop_frame(frame_index, next_l, next_r);
+                        }
                     }
                     // On underrun: keep next == prev (repeat last frame).
                     // This is a gentle hold — better than a hard silence click.

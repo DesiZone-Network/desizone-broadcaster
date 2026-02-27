@@ -193,6 +193,15 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             master_level     REAL    NOT NULL DEFAULT 1.0
         );
 
+        CREATE TABLE IF NOT EXISTS controller_config (
+            id                  INTEGER PRIMARY KEY DEFAULT 1,
+            enabled             INTEGER NOT NULL DEFAULT 1,
+            auto_connect        INTEGER NOT NULL DEFAULT 1,
+            preferred_device_id TEXT,
+            profile             TEXT    NOT NULL DEFAULT 'hercules_djcontrol_starlight',
+            updated_at          INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+
         -- Phase 6: Gateway connection settings
         CREATE TABLE IF NOT EXISTS gateway_config (
             id              INTEGER PRIMARY KEY DEFAULT 1,
@@ -1135,6 +1144,72 @@ pub async fn save_monitor_routing_config(
     .bind(&config.cue_mix_mode)
     .bind(config.cue_level as f64)
     .bind(config.master_level as f64)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Controller config ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerConfigRow {
+    pub enabled: bool,
+    pub auto_connect: bool,
+    pub preferred_device_id: Option<String>,
+    pub profile: String,
+}
+
+impl Default for ControllerConfigRow {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_connect: true,
+            preferred_device_id: None,
+            profile: "hercules_djcontrol_starlight".to_string(),
+        }
+    }
+}
+
+pub async fn get_controller_config(pool: &SqlitePool) -> Result<ControllerConfigRow, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT enabled, auto_connect, preferred_device_id, profile
+         FROM controller_config WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => Ok(ControllerConfigRow {
+            enabled: r.get::<i64, _>("enabled") != 0,
+            auto_connect: r.get::<i64, _>("auto_connect") != 0,
+            preferred_device_id: r.get("preferred_device_id"),
+            profile: r.get("profile"),
+        }),
+        None => Ok(ControllerConfigRow::default()),
+    }
+}
+
+pub async fn save_controller_config(
+    pool: &SqlitePool,
+    config: &ControllerConfigRow,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO controller_config
+            (id, enabled, auto_connect, preferred_device_id, profile, updated_at)
+        VALUES (1, ?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(id) DO UPDATE SET
+            enabled = excluded.enabled,
+            auto_connect = excluded.auto_connect,
+            preferred_device_id = excluded.preferred_device_id,
+            profile = excluded.profile,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(config.enabled as i64)
+    .bind(config.auto_connect as i64)
+    .bind(&config.preferred_device_id)
+    .bind(&config.profile)
     .execute(pool)
     .await?;
     Ok(())

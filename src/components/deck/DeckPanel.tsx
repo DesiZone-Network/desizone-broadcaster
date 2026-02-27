@@ -4,7 +4,7 @@ import {
     Volume2, Headphones, Radio, Music2, X,
 } from "lucide-react";
 import {
-    playDeck, pauseDeck, seekDeck, setChannelGain,
+    playDeck, pauseDeck, seekDeck, jogDeck, setChannelGain, setDeckBass, setDeckFilter,
     stopDeck, nextDeck,
     setDeckTempo, setDeckLoop, clearDeckLoop,
     getDeckState,
@@ -34,6 +34,7 @@ import {
     PipelineSettings,
     DeckId, DeckStateEvent, VuEvent, HotCue, BeatGridAnalysis,
 } from "../../lib/bridge";
+import { resolveAlbumArtUrl } from "../../lib/albumArt";
 import { writeEventLog } from "../../lib/bridge7";
 import type { SamSong } from "../../lib/bridge";
 import { WaveformCanvas } from "./WaveformCanvas";
@@ -190,6 +191,61 @@ const HOT_CUE_COLORS = [
     "#f97316",
 ];
 const HOT_CUE_SLOTS = 4;
+const LOOP_BUTTON_BEATS = [1, 2, 4, 8, 16] as const;
+
+function nearestBeatIndex(beatsMs: number[], targetMs: number): number {
+    let bestIdx = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < beatsMs.length; i += 1) {
+        const dist = Math.abs(beatsMs[i] - targetMs);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = i;
+        }
+    }
+    return bestIdx;
+}
+
+function inferLoopBeats(
+    startMs: number,
+    endMs: number,
+    beatgrid: BeatGridAnalysis | null,
+    songMetaBpm: number | null
+): number {
+    if (beatgrid?.beat_times_ms && beatgrid.beat_times_ms.length >= 2) {
+        const times = beatgrid.beat_times_ms;
+        const startIdx = nearestBeatIndex(times, startMs);
+        const endIdx = nearestBeatIndex(times, endMs);
+        const beatDistance = Math.max(1, endIdx - startIdx);
+        let best: number = LOOP_BUTTON_BEATS[0];
+        let bestErr = Number.POSITIVE_INFINITY;
+        for (const candidate of LOOP_BUTTON_BEATS) {
+            const err = Math.abs(candidate - beatDistance);
+            if (err < bestErr) {
+                bestErr = err;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    const bpm =
+        (beatgrid?.bpm && beatgrid.bpm > 0 ? beatgrid.bpm : null) ??
+        (songMetaBpm && songMetaBpm > 0 ? songMetaBpm : null) ??
+        120;
+    const beatMs = 60_000 / bpm;
+    const approxBeats = Math.max(1, Math.round((endMs - startMs) / beatMs));
+    let best: number = LOOP_BUTTON_BEATS[0];
+    let bestErr = Number.POSITIVE_INFINITY;
+    for (const candidate of LOOP_BUTTON_BEATS) {
+        const err = Math.abs(candidate - approxBeats);
+        if (err < bestErr) {
+            bestErr = err;
+            best = candidate;
+        }
+    }
+    return best;
+}
 
 function bpmMismatch(a: number | null, b: number | null): number {
     if (!a || !b || a <= 0 || b <= 0) return 0;
@@ -216,6 +272,8 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     const [deckState, setDeckState] = useState<DeckStateEvent | null>(null);
     const [vuData, setVuData] = useState<VuEvent | null>(null);
     const [volume, setVolume] = useState(1.0);
+    const [bassDb, setBassDb] = useState(0);
+    const [filterAmount, setFilterAmount] = useState(0);
     const [tempoPct, setTempoPct] = useState(0);
     const [monitorMode, setMonitorMode] = useState<"air" | "cue">("air");
     const [waveformData, setWaveformData] = useState<Float32Array | null>(null);
@@ -227,7 +285,13 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     const [isFocused, setIsFocused] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
-    const [loadedSong, setLoadedSong] = useState<{ title: string; artist: string; path?: string | null } | null>(null);
+    const [loadedSong, setLoadedSong] = useState<{
+        title: string;
+        artist: string;
+        path?: string | null;
+        picture?: string | null;
+    } | null>(null);
+    const [albumArtLoadFailed, setAlbumArtLoadFailed] = useState(false);
     const [songMetaBpm, setSongMetaBpm] = useState<number | null>(null);
     const [stemFilter, setStemFilter] = useState<{ mode: StemFilterMode; amount: number }>({
         mode: "off",
@@ -242,6 +306,11 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     const loadErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const panelRef = useRef<HTMLDivElement>(null);
     const originalTrackPathRef = useRef<string | null>(null);
+    const jogDragActiveRef = useRef(false);
+    const jogLastClientXRef = useRef(0);
+    const jogPixelAccumulatorRef = useRef(0);
+    const jogPendingStepsRef = useRef(0);
+    const jogLastInvokeAtRef = useRef(0);
 
     const isPlaying = deckState?.state === "playing" || deckState?.state === "crossfading";
     const positionMs = deckState?.position_ms ?? 0;
@@ -258,6 +327,11 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     const headline = loadedSong
         ? [loadedSong.artist, loadedSong.title].filter(Boolean).join(" - ")
         : "";
+    const albumArtSrc = resolveAlbumArtUrl(loadedSong?.picture ?? null);
+
+    useEffect(() => {
+        setAlbumArtLoadFailed(false);
+    }, [loadedSong?.picture, deckState?.song_id]);
 
     useEffect(() => {
         const unsub = onDeckStateChanged((e) => {
@@ -268,11 +342,56 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
 
     useEffect(() => {
         if (!deckState) return;
+        if (typeof deckState.channel_gain === "number") {
+            setVolume(deckState.channel_gain);
+        }
         if (typeof deckState.tempo_pct === "number") setTempoPct(deckState.tempo_pct);
+        if (typeof deckState.bass_db === "number") {
+            setBassDb(deckState.bass_db);
+        }
+        if (typeof deckState.filter_amount === "number") {
+            setFilterAmount(deckState.filter_amount);
+        }
         if (typeof deckState.cue_preview_enabled === "boolean") {
             setMonitorMode(deckState.cue_preview_enabled ? "cue" : "air");
         }
-    }, [deckState?.tempo_pct, deckState?.cue_preview_enabled]);
+    }, [
+        deckState?.channel_gain,
+        deckState?.tempo_pct,
+        deckState?.bass_db,
+        deckState?.filter_amount,
+        deckState?.cue_preview_enabled,
+    ]);
+
+    useEffect(() => {
+        const loopEnabled = Boolean(deckState?.loop_enabled);
+        const startMs = deckState?.loop_start_ms ?? null;
+        const endMs = deckState?.loop_end_ms ?? null;
+
+        if (!loopEnabled || startMs == null || endMs == null || endMs <= startMs + 10) {
+            setBeatLoop((prev) => (prev ? null : prev));
+            return;
+        }
+
+        const beats = inferLoopBeats(startMs, endMs, beatgrid, songMetaBpm);
+        setBeatLoop((prev) => {
+            if (
+                prev &&
+                prev.startMs === startMs &&
+                prev.endMs === endMs &&
+                prev.beats === beats
+            ) {
+                return prev;
+            }
+            return { startMs, endMs, beats };
+        });
+    }, [
+        deckState?.loop_enabled,
+        deckState?.loop_start_ms,
+        deckState?.loop_end_ms,
+        beatgrid,
+        songMetaBpm,
+    ]);
 
     useEffect(() => {
         const unsub = onVuMeter((e) => {
@@ -358,6 +477,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                         title: song.title || filenameFromPath(filePath),
                         artist: song.artist || "",
                         path: filePath,
+                        picture: song.picture ?? null,
                     });
                     setSongMetaBpm(song.bpm && song.bpm > 0 ? song.bpm : null);
                 })
@@ -367,6 +487,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                         title: filenameFromPath(filePath),
                         artist: "",
                         path: filePath,
+                        picture: null,
                     });
                     setSongMetaBpm(null);
                 });
@@ -375,6 +496,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                 title: filenameFromPath(filePath),
                 artist: "",
                 path: filePath,
+                picture: null,
             });
             setSongMetaBpm(null);
         }
@@ -476,6 +598,16 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     const handleTempoChange = useCallback((v: number) => {
         setTempoPct(v);
         setDeckTempo(deckId, v).catch(console.error);
+    }, [deckId]);
+
+    const handleBassChange = useCallback((v: number) => {
+        setBassDb(v);
+        setDeckBass(deckId, v).catch(console.error);
+    }, [deckId]);
+
+    const handleFilterChange = useCallback((v: number) => {
+        setFilterAmount(v);
+        setDeckFilter(deckId, v).catch(console.error);
     }, [deckId]);
 
     const handleSeek = useCallback((ms: number) => {
@@ -605,6 +737,24 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
         }
     }, [deckId, deckState?.file_path, deckState?.song_id, stemAnalysis?.source_file_path, stemFilter.amount]);
 
+    const applyJog = useCallback((rawSteps: number) => {
+        if ((deckState?.duration_ms ?? 0) <= 0) return;
+        const intSteps = Math.trunc(rawSteps);
+        if (intSteps === 0) return;
+
+        jogPendingStepsRef.current += intSteps;
+        const now = Date.now();
+        if (now - jogLastInvokeAtRef.current < 35 && Math.abs(jogPendingStepsRef.current) < 4) {
+            return;
+        }
+
+        const toSend = Math.max(-12, Math.min(12, jogPendingStepsRef.current));
+        if (toSend === 0) return;
+        jogPendingStepsRef.current -= toSend;
+        jogLastInvokeAtRef.current = now;
+        jogDeck(deckId, toSend).catch(console.error);
+    }, [deckId, deckState?.duration_ms]);
+
     const buildBeatLoopRange = useCallback((beats: number) => {
         if (beats <= 0) return null;
         if (durationMs <= 0) return null;
@@ -687,13 +837,17 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     }, [beatgrid, durationMs, isPlaying, positionMs, songMetaBpm]);
 
     const activateBeatLoop = useCallback((beats: number) => {
+        if (beatLoop?.beats === beats) {
+            clearDeckLoop(deckId).catch(console.error);
+            return;
+        }
         const range = buildBeatLoopRange(beats);
         if (!range) return;
         setBeatLoop({ startMs: range.startMs, endMs: range.endMs, beats });
         setDeckLoop(deckId, range.startMs, range.endMs)
             .then(() => seekDeck(deckId, range.startMs))
             .catch(console.error);
-    }, [buildBeatLoopRange, deckId]);
+    }, [beatLoop?.beats, buildBeatLoopRange, deckId]);
 
     const clearBeatLoop = useCallback(() => {
         setBeatLoop(null);
@@ -854,7 +1008,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
         try {
             await loadTrack(deckId, filePath);
             setLoadError(null);
-            setLoadedSong({ title: filenameFromPath(filePath), artist: "", path: filePath });
+            setLoadedSong({ title: filenameFromPath(filePath), artist: "", path: filePath, picture: null });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             showLoadError(msg);
@@ -886,6 +1040,32 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
+                    {albumArtSrc && !albumArtLoadFailed ? (
+                        <img
+                            src={albumArtSrc}
+                            alt="Album art"
+                            onError={() => setAlbumArtLoadFailed(true)}
+                            style={{
+                                width: 20,
+                                height: 20,
+                                borderRadius: 4,
+                                objectFit: "cover",
+                                border: "1px solid var(--border-strong)",
+                                flexShrink: 0,
+                            }}
+                        />
+                    ) : (
+                        <div
+                            style={{
+                                width: 20,
+                                height: 20,
+                                borderRadius: 4,
+                                border: "1px solid var(--border-default)",
+                                background: "var(--bg-input)",
+                                flexShrink: 0,
+                            }}
+                        />
+                    )}
                     <div
                         style={{
                             width: 6, height: 6, borderRadius: "50%",
@@ -958,7 +1138,12 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                     try {
                         await loadTrack(deckId, song.filename, song.id);
                         setLoadError(null);
-                        setLoadedSong({ title: song.title, artist: song.artist, path: song.filename });
+                        setLoadedSong({
+                            title: song.title,
+                            artist: song.artist,
+                            path: song.filename,
+                            picture: song.picture ?? null,
+                        });
                     } catch (err) {
                         const msg = err instanceof Error ? err.message : String(err);
                         showLoadError(msg);
@@ -981,24 +1166,52 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                         </span>
                     </div>
                 ) : deckState && deckState.state !== "idle" ? (
-                    <div style={{ overflow: "hidden" }}>
-                        <MarqueeLine
-                            text={
-                                headline ||
-                                (deckState.state === "playing" || deckState.state === "crossfading"
-                                    ? "Playing…"
-                                    : "Track Loaded")
-                            }
-                            className="font-medium"
-                            fontSize={12}
-                            color="var(--text-primary)"
-                        />
-                        <MarqueeLine
-                            text={loadedSong?.path ? filenameFromPath(loadedSong.path) : deckState.file_path ? filenameFromPath(deckState.file_path) : deckState.state}
-                            className="text-xs text-muted"
-                            fontSize={10}
-                            color="var(--text-muted)"
-                        />
+                    <div className="flex items-center gap-2" style={{ minHeight: 32 }}>
+                        {albumArtSrc && !albumArtLoadFailed ? (
+                            <img
+                                src={albumArtSrc}
+                                alt="Album art"
+                                onError={() => setAlbumArtLoadFailed(true)}
+                                style={{
+                                    width: 30,
+                                    height: 30,
+                                    borderRadius: 4,
+                                    objectFit: "cover",
+                                    border: "1px solid var(--border-strong)",
+                                    flexShrink: 0,
+                                }}
+                            />
+                        ) : (
+                            <div
+                                style={{
+                                    width: 30,
+                                    height: 30,
+                                    borderRadius: 4,
+                                    border: "1px solid var(--border-default)",
+                                    background: "var(--bg-elevated)",
+                                    flexShrink: 0,
+                                }}
+                            />
+                        )}
+                        <div style={{ overflow: "hidden", minWidth: 0, flex: 1 }}>
+                            <MarqueeLine
+                                text={
+                                    headline ||
+                                    (deckState.state === "playing" || deckState.state === "crossfading"
+                                        ? "Playing…"
+                                        : "Track Loaded")
+                                }
+                                className="font-medium"
+                                fontSize={12}
+                                color="var(--text-primary)"
+                            />
+                            <MarqueeLine
+                                text={loadedSong?.path ? filenameFromPath(loadedSong.path) : deckState.file_path ? filenameFromPath(deckState.file_path) : deckState.state}
+                                className="text-xs text-muted"
+                                fontSize={10}
+                                color="var(--text-muted)"
+                            />
+                        </div>
                     </div>
                 ) : (
                     <div className="flex items-center gap-2 text-muted" style={{ height: 32 }}>
@@ -1053,7 +1266,42 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
             <div className="flex items-center justify-between" style={{ marginTop: 2 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div
-                        title="Platter"
+                        title="Jog platter (drag or scroll to nudge)"
+                        onWheel={(e) => {
+                            if ((deckState?.duration_ms ?? 0) <= 0) return;
+                            e.preventDefault();
+                            const wheel = e.deltaY + e.deltaX * 0.5;
+                            if (wheel === 0) return;
+                            const direction = wheel > 0 ? -1 : 1;
+                            const magnitude = Math.max(1, Math.min(8, Math.round(Math.abs(wheel) / 18)));
+                            applyJog(direction * magnitude);
+                        }}
+                        onMouseDown={(e) => {
+                            if ((deckState?.duration_ms ?? 0) <= 0) return;
+                            jogDragActiveRef.current = true;
+                            jogLastClientXRef.current = e.clientX;
+                            jogPixelAccumulatorRef.current = 0;
+
+                            const onMove = (ev: MouseEvent) => {
+                                if (!jogDragActiveRef.current) return;
+                                const dx = ev.clientX - jogLastClientXRef.current;
+                                jogLastClientXRef.current = ev.clientX;
+                                jogPixelAccumulatorRef.current += dx;
+                                const steps = Math.trunc(jogPixelAccumulatorRef.current / 6);
+                                if (steps !== 0) {
+                                    jogPixelAccumulatorRef.current -= steps * 6;
+                                    applyJog(steps);
+                                }
+                            };
+                            const onUp = () => {
+                                jogDragActiveRef.current = false;
+                                window.removeEventListener("mousemove", onMove);
+                                window.removeEventListener("mouseup", onUp);
+                            };
+                            window.addEventListener("mousemove", onMove);
+                            window.addEventListener("mouseup", onUp);
+                            e.preventDefault();
+                        }}
                         style={{
                             width: 20,
                             height: 20,
@@ -1063,6 +1311,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                             position: "relative",
                             transform: `rotate(${(positionMs / 1000) * 220}deg)`,
                             transition: isPlaying ? "none" : "transform 160ms ease-out",
+                            cursor: "ew-resize",
                         }}
                     >
                         <div
@@ -1169,7 +1418,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                 <span className="mono text-muted" style={{ fontSize: 8, marginLeft: 4 }}>
                     LOOP {beatLoop ? `(${beatLoop.beats}B)` : "(OFF)"}
                 </span>
-                {[1, 2, 4, 8, 16].map((beats) => (
+                {LOOP_BUTTON_BEATS.map((beats) => (
                     <button
                         key={beats}
                         className="btn"
@@ -1482,6 +1731,44 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                     {tempoPct >= 0 ? "+" : ""}{tempoPct.toFixed(1)}%
                 </span>
                 <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset tempo" onClick={() => handleTempoChange(0)}>↺</button>
+            </div>
+
+            <div className="flex items-center gap-2" style={{ marginTop: 2 }}>
+                <span className="mono text-muted" style={{ fontSize: 9, minWidth: 36 }}>BASS</span>
+                <input
+                    type="range"
+                    min={-12}
+                    max={12}
+                    step={0.1}
+                    value={bassDb}
+                    onChange={(e) => handleBassChange(parseFloat(e.target.value))}
+                    style={{ flex: 1, accentColor: accentColor, height: 3, cursor: "pointer" }}
+                />
+                <span className="mono" style={{ fontSize: 9, minWidth: 46, color: "var(--text-secondary)", textAlign: "right" }}>
+                    {bassDb >= 0 ? "+" : ""}{bassDb.toFixed(1)} dB
+                </span>
+                <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset bass" onClick={() => handleBassChange(0)}>↺</button>
+            </div>
+
+            <div className="flex items-center gap-2" style={{ marginTop: 2 }}>
+                <span className="mono text-muted" style={{ fontSize: 9, minWidth: 36 }}>FILTER</span>
+                <input
+                    type="range"
+                    min={-1}
+                    max={1}
+                    step={0.01}
+                    value={filterAmount}
+                    onChange={(e) => handleFilterChange(parseFloat(e.target.value))}
+                    style={{ flex: 1, accentColor: accentColor, height: 3, cursor: "pointer" }}
+                />
+                <span className="mono" style={{ fontSize: 9, minWidth: 46, color: "var(--text-secondary)", textAlign: "right" }}>
+                    {filterAmount > 0.03
+                        ? `HP ${Math.round(filterAmount * 100)}%`
+                        : filterAmount < -0.03
+                        ? `LP ${Math.round(-filterAmount * 100)}%`
+                        : "OFF"}
+                </span>
+                <button className="btn btn-ghost btn-icon" style={{ width: 16, height: 16 }} title="Reset filter" onClick={() => handleFilterChange(0)}>↺</button>
             </div>
 
         </div>

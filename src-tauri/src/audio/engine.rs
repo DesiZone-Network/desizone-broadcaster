@@ -50,9 +50,16 @@ pub struct DeckStateEvent {
     pub playback_rate: f32,
     pub pitch_pct: f32,
     pub tempo_pct: f32,
+    pub channel_gain: f32,
+    pub bass_db: f32,
+    pub filter_amount: f32,
+    pub master_level: f32,
     pub decoder_buffer_ms: u64,
     pub rms_db_pre_fader: f32,
     pub cue_preview_enabled: bool,
+    pub loop_enabled: bool,
+    pub loop_start_ms: Option<u64>,
+    pub loop_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +88,8 @@ struct RtState {
     crossfade: CrossfadeState,
     crossfade_config: CrossfadeConfig,
     manual_crossfade_pos: f32,
+    deck_bass_db: HashMap<DeckId, f32>,
+    deck_filter_amount: HashMap<DeckId, f32>,
     cue_preview_enabled: HashMap<DeckId, bool>,
     cue_split_active: bool,
     cue_level: f32,
@@ -112,6 +121,17 @@ enum EngineCmd {
     SetGain {
         deck: DeckId,
         gain: f32,
+    },
+    SetDeckBass {
+        deck: DeckId,
+        bass_db: f32,
+    },
+    SetDeckFilter {
+        deck: DeckId,
+        amount: f32,
+    },
+    SetMasterLevel {
+        level: f32,
     },
     SetDeckPitch {
         deck: DeckId,
@@ -248,6 +268,18 @@ impl AudioEngine {
             crossfade: CrossfadeState::default(),
             crossfade_config: CrossfadeConfig::default(),
             manual_crossfade_pos: -1.0,
+            deck_bass_db: {
+                let mut m = HashMap::new();
+                m.insert(DeckId::DeckA, 0.0);
+                m.insert(DeckId::DeckB, 0.0);
+                m
+            },
+            deck_filter_amount: {
+                let mut m = HashMap::new();
+                m.insert(DeckId::DeckA, 0.0);
+                m.insert(DeckId::DeckB, 0.0);
+                m
+            },
             cue_preview_enabled: {
                 let mut m = HashMap::new();
                 m.insert(DeckId::DeckA, false);
@@ -402,6 +434,26 @@ impl AudioEngine {
         self.send_cmd(EngineCmd::SetGain { deck, gain })
     }
 
+    pub fn set_deck_bass(&mut self, deck: DeckId, bass_db: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetDeckBass {
+            deck,
+            bass_db: bass_db.clamp(-12.0, 12.0),
+        })
+    }
+
+    pub fn set_deck_filter(&mut self, deck: DeckId, amount: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetDeckFilter {
+            deck,
+            amount: amount.clamp(-1.0, 1.0),
+        })
+    }
+
+    pub fn set_master_level(&mut self, level: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetMasterLevel {
+            level: level.clamp(0.0, 1.0),
+        })
+    }
+
     pub fn set_deck_pitch(&mut self, deck: DeckId, pitch_pct: f32) -> Result<(), String> {
         self.send_cmd(EngineCmd::SetDeckPitch {
             deck,
@@ -486,22 +538,36 @@ impl AudioEngine {
 
     pub fn get_deck_state(&self, deck: DeckId) -> Option<DeckStateEvent> {
         let rt = self.rt_state.lock().unwrap();
-        rt.decks.get(&deck).map(|d| DeckStateEvent {
-            deck: deck.to_string(),
-            state: format!("{:?}", d.state).to_lowercase(),
-            position_ms: d.position_ms(),
-            duration_ms: d.duration_ms(),
-            song_id: d.song_id,
-            file_path: d
-                .file_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            playback_rate: d.playback_rate,
-            pitch_pct: d.pitch_pct,
-            tempo_pct: d.tempo_pct,
-            decoder_buffer_ms: d.decoder_buffered_ms(),
-            rms_db_pre_fader: d.rms_db_pre_fader,
-            cue_preview_enabled: rt.cue_preview_enabled.get(&deck).copied().unwrap_or(false),
+        rt.decks.get(&deck).map(|d| {
+            let loop_range = d.loop_range_ms();
+            let (bass_db, filter_amount) = (
+                rt.deck_bass_db.get(&deck).copied().unwrap_or(0.0),
+                rt.deck_filter_amount.get(&deck).copied().unwrap_or(0.0),
+            );
+            DeckStateEvent {
+                deck: deck.to_string(),
+                state: format!("{:?}", d.state).to_lowercase(),
+                position_ms: d.position_ms(),
+                duration_ms: d.duration_ms(),
+                song_id: d.song_id,
+                file_path: d
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                playback_rate: d.playback_rate,
+                pitch_pct: d.pitch_pct,
+                tempo_pct: d.tempo_pct,
+                channel_gain: d.channel_gain,
+                bass_db,
+                filter_amount,
+                master_level: rt.master_level,
+                decoder_buffer_ms: d.decoder_buffered_ms(),
+                rms_db_pre_fader: d.rms_db_pre_fader,
+                cue_preview_enabled: rt.cue_preview_enabled.get(&deck).copied().unwrap_or(false),
+                loop_enabled: loop_range.is_some(),
+                loop_start_ms: loop_range.map(|(start, _)| start),
+                loop_end_ms: loop_range.map(|(_, end)| end),
+            }
         })
     }
 
@@ -519,6 +585,10 @@ impl AudioEngine {
 
     pub fn get_manual_crossfade_pos(&self) -> f32 {
         self.rt_state.lock().unwrap().manual_crossfade_pos
+    }
+
+    pub fn get_master_level(&self) -> f32 {
+        self.rt_state.lock().unwrap().master_level
     }
 
     pub fn take_track_completions(&self) -> Vec<TrackCompletionEvent> {
@@ -656,16 +726,6 @@ fn audio_callback(
     let manual_pos = rt.manual_crossfade_pos.clamp(-1.0, 1.0);
     let manual_gain_a = ((1.0 - manual_pos) * 0.5).clamp(0.0, 1.0);
     let manual_gain_b = ((1.0 + manual_pos) * 0.5).clamp(0.0, 1.0);
-    let a_live = rt
-        .decks
-        .get(&DeckId::DeckA)
-        .map(|d| matches!(d.state, DeckState::Playing | DeckState::Crossfading))
-        .unwrap_or(false);
-    let b_live = rt
-        .decks
-        .get(&DeckId::DeckB)
-        .map(|d| matches!(d.state, DeckState::Playing | DeckState::Crossfading))
-        .unwrap_or(false);
 
     // ── Fill per-deck buffers ────────────────────────────────────────────
     // Cache device_sr before the loop — borrowing rt.sample_rate while
@@ -695,30 +755,12 @@ fn audio_callback(
                 }
             } else {
                 // Manual crossfader when no active auto/timed fade.
-                // If only one deck is live, force that deck audible to avoid
-                // accidental silence from stale slider position.
                 match id {
                     DeckId::DeckA => {
-                        deck.xfade_gain = if a_live ^ b_live {
-                            if a_live {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        } else {
-                            manual_gain_a
-                        };
+                        deck.xfade_gain = manual_gain_a;
                     }
                     DeckId::DeckB => {
-                        deck.xfade_gain = if a_live ^ b_live {
-                            if b_live {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        } else {
-                            manual_gain_b
-                        };
+                        deck.xfade_gain = manual_gain_b;
                     }
                     _ => deck.xfade_gain = 1.0,
                 }
@@ -858,6 +900,17 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
                     d.channel_gain = gain.clamp(0.0, 1.0);
                 }
             }
+            EngineCmd::SetDeckBass { deck, bass_db } => {
+                rt.deck_bass_db.insert(deck, bass_db.clamp(-12.0, 12.0));
+                apply_deck_tone(rt, deck);
+            }
+            EngineCmd::SetDeckFilter { deck, amount } => {
+                rt.deck_filter_amount.insert(deck, amount.clamp(-1.0, 1.0));
+                apply_deck_tone(rt, deck);
+            }
+            EngineCmd::SetMasterLevel { level } => {
+                rt.master_level = level.clamp(0.0, 1.0);
+            }
             EngineCmd::SetDeckPitch { deck, pct } => {
                 if let Some(d) = rt.decks.get_mut(&deck) {
                     d.set_pitch_pct(pct);
@@ -943,6 +996,7 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
                 if let Some(p) = rt.pipelines.get_mut(&deck) {
                     *p = ChannelPipeline::from_settings(rt.sample_rate as f32, settings);
                 }
+                apply_deck_tone(rt, deck);
             }
             EngineCmd::SetMasterPipeline { settings } => {
                 rt.master_pipeline =
@@ -968,6 +1022,22 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
             }
         }
     }
+}
+
+fn apply_deck_tone(rt: &mut RtState, deck: DeckId) {
+    let Some(pipeline) = rt.pipelines.get_mut(&deck) else {
+        return;
+    };
+    let bass_db = rt.deck_bass_db.get(&deck).copied().unwrap_or(0.0);
+    let filter = rt.deck_filter_amount.get(&deck).copied().unwrap_or(0.0);
+
+    let low_cut_db = if filter > 0.0 { -18.0 * filter } else { 0.0 };
+    let high_cut_db = if filter < 0.0 { -18.0 * (-filter) } else { 0.0 };
+
+    let mut eq = pipeline.eq.config().clone();
+    eq.low_gain_db = (bass_db + low_cut_db).clamp(-24.0, 12.0);
+    eq.high_gain_db = high_cut_db.clamp(-24.0, 12.0);
+    pipeline.eq.set_config(eq);
 }
 
 #[inline]

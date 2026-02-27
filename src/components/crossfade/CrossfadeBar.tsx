@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowRightLeft, MoveHorizontal, Settings2 } from "lucide-react";
 import {
     onCrossfadeProgress,
+    onManualCrossfadeChanged,
     CrossfadeProgressEvent,
     getChannelDsp,
     setManualCrossfade,
@@ -97,6 +98,15 @@ export function CrossfadeBar({ deckA, deckB, onForceCrossfade }: Props) {
             } else if (e.outgoing_deck === "deck_b" && e.incoming_deck === "deck_a") {
                 setManualPos(1 - e.progress * 2);
             }
+        });
+        return () => {
+            unsub.then((f) => f());
+        };
+    }, []);
+
+    useEffect(() => {
+        const unsub = onManualCrossfadeChanged((e) => {
+            setManualPos(Math.max(-1, Math.min(1, e.position)));
         });
         return () => {
             unsub.then((f) => f());

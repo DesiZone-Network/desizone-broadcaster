@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod audio;
 pub mod commands;
+pub mod controller;
 pub mod db;
 pub mod gateway;
 pub mod scheduler;
@@ -16,11 +17,16 @@ use commands::{
         get_song_play_history, get_top_songs, write_event_log,
     },
     audio_commands::{
-        clear_deck_loop, get_deck_state, get_vu_readings, load_track, next_deck, pause_deck,
-        play_deck, seek_deck, set_channel_gain, set_deck_loop, set_deck_pitch, set_deck_tempo,
+        clear_deck_loop, get_deck_state, get_master_level, get_vu_readings, jog_deck, load_track,
+        next_deck, pause_deck, play_deck, seek_deck, set_channel_gain, set_deck_bass,
+        set_deck_filter, set_deck_loop, set_deck_pitch, set_deck_tempo, set_master_level,
         stop_deck,
     },
     beatgrid_commands::{analyze_beatgrid, get_beatgrid},
+    controller_commands::{
+        connect_controller, disconnect_controller, get_controller_config,
+        get_controller_status, list_controller_devices, save_controller_config_cmd,
+    },
     crossfade_commands::{
         get_crossfade_config, get_fade_curve_preview, set_crossfade_config, set_manual_crossfade,
         start_crossfade, trigger_manual_fade,
@@ -75,7 +81,7 @@ use commands::{
     waveform_commands::get_waveform_data,
 };
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -91,12 +97,18 @@ pub fn run() {
     std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
     let db_path = format!("{app_data_dir}/app.db");
 
-    let (local_pool, sam_pool_opt, startup_crossfade_cfg, startup_autodj_cfg, startup_monitor_cfg) =
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to build init Tokio runtime")
-            .block_on(async {
+    let (
+        local_pool,
+        sam_pool_opt,
+        startup_crossfade_cfg,
+        startup_autodj_cfg,
+        startup_monitor_cfg,
+        startup_controller_cfg,
+    ) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build init Tokio runtime")
+        .block_on(async {
                 // 1. SQLite (always required)
                 let local = db::local::init_db(&db_path)
                     .await
@@ -126,6 +138,15 @@ pub fn run() {
                     startup_crossfade_cfg = Some(cfg);
                 }
                 let startup_monitor_cfg = db::local::get_monitor_routing_config(&local).await.ok();
+                let startup_controller_cfg =
+                    db::local::get_controller_config(&local).await.ok().map(|cfg| {
+                        crate::controller::types::ControllerConfig {
+                            enabled: cfg.enabled,
+                            auto_connect: cfg.auto_connect,
+                            preferred_device_id: cfg.preferred_device_id,
+                            profile: cfg.profile,
+                        }
+                    });
 
                 // 2. SAM MySQL — attempt auto-connect if configured
                 let sam_opt = match db::local::load_sam_db_config_full(&local).await {
@@ -163,6 +184,7 @@ pub fn run() {
                     startup_crossfade_cfg,
                     startup_autodj_cfg,
                     startup_monitor_cfg,
+                    startup_controller_cfg,
                 )
             });
 
@@ -180,6 +202,9 @@ pub fn run() {
             .lock()
             .unwrap()
             .set_monitor_routing_config(cfg);
+    }
+    if let Some(cfg) = startup_controller_cfg {
+        app_state.controller_service.set_config(cfg, None);
     }
     if let Some(pool) = sam_pool_opt {
         app_state = app_state.with_sam_db(pool);
@@ -200,6 +225,21 @@ pub fn run() {
                 let _ = main_window.set_focus();
             }
 
+            {
+                let state = app.state::<AppState>();
+                state
+                    .controller_service
+                    .start_background(app.handle().clone());
+                let cfg = state.controller_service.get_config();
+                if cfg.enabled && cfg.auto_connect {
+                    let _ = state.controller_service.connect(None, &app.handle().clone());
+                } else {
+                    let _ = app
+                        .handle()
+                        .emit("controller_status_changed", state.controller_service.get_status());
+                }
+            }
+
             // ── Background polling loop ──────────────────────────────────────
             // Emits `deck_state_changed` (every 80 ms) and `vu_meter` events
             // to the frontend, since the audio engine is poll-based (no push).
@@ -211,13 +251,15 @@ pub fn run() {
 
                 let state = app_handle.state::<AppState>();
                 let mut interval = tokio::time::interval(Duration::from_millis(80));
+                let mut last_manual_crossfade_pos: Option<f32> = None;
+                let mut last_master_level: Option<f32> = None;
 
                 loop {
                     interval.tick().await;
 
                     // Collect data while holding the engine lock briefly,
                     // then release it before emitting (avoid holding across await).
-                    let (deck_events, vu_events, crossfade_event) = {
+                    let (deck_events, vu_events, crossfade_event, manual_crossfade_pos, master_level) = {
                         let engine = state.engine.lock().unwrap();
                         let deck_events: Vec<_> = [
                             DeckId::DeckA,
@@ -232,7 +274,15 @@ pub fn run() {
                         .collect();
                         let vu_events = engine.get_vu_readings();
                         let crossfade_event = engine.get_crossfade_progress_event();
-                        (deck_events, vu_events, crossfade_event)
+                        let manual_crossfade_pos = engine.get_manual_crossfade_pos();
+                        let master_level = engine.get_master_level();
+                        (
+                            deck_events,
+                            vu_events,
+                            crossfade_event,
+                            manual_crossfade_pos,
+                            master_level,
+                        )
                     };
 
                     for ev in &deck_events {
@@ -243,6 +293,26 @@ pub fn run() {
                     }
                     if let Some(ev) = &crossfade_event {
                         let _ = app_handle.emit("crossfade_progress", ev);
+                    }
+                    let should_emit_manual = last_manual_crossfade_pos
+                        .map(|prev| (prev - manual_crossfade_pos).abs() > 0.001)
+                        .unwrap_or(true);
+                    if should_emit_manual {
+                        last_manual_crossfade_pos = Some(manual_crossfade_pos);
+                        let _ = app_handle.emit(
+                            "manual_crossfade_changed",
+                            serde_json::json!({ "position": manual_crossfade_pos }),
+                        );
+                    }
+                    let should_emit_master = last_master_level
+                        .map(|prev| (prev - master_level).abs() > 0.001)
+                        .unwrap_or(true);
+                    if should_emit_master {
+                        last_master_level = Some(master_level);
+                        let _ = app_handle.emit(
+                            "master_volume_changed",
+                            serde_json::json!({ "level": master_level }),
+                        );
                     }
                 }
             });
@@ -945,9 +1015,14 @@ pub fn run() {
             stop_deck,
             next_deck,
             seek_deck,
+            jog_deck,
             set_channel_gain,
+            set_deck_bass,
+            set_deck_filter,
             set_deck_pitch,
             set_deck_tempo,
+            set_master_level,
+            get_master_level,
             set_deck_loop,
             clear_deck_loop,
             get_deck_state,
@@ -985,6 +1060,13 @@ pub fn run() {
             get_monitor_routing_config,
             set_monitor_routing_config,
             set_deck_cue_preview_enabled,
+            // Controller
+            list_controller_devices,
+            get_controller_status,
+            get_controller_config,
+            save_controller_config_cmd,
+            connect_controller,
+            disconnect_controller,
             // Phase 1 — Queue / SAM
             get_queue,
             add_to_queue,
@@ -1441,6 +1523,13 @@ async fn process_track_completions(
     };
     let local_pool = state.local_db.clone();
     let mut completed_queue_ids = Vec::new();
+    let listeners_total: i64 = state
+        .encoder_manager
+        .get_all_runtime()
+        .iter()
+        .map(|r| r.listeners.unwrap_or(0) as i64)
+        .sum();
+    let listener_snapshot = listeners_total.clamp(0, i32::MAX as i64) as i32;
 
     for ev in completed {
         let song = match crate::db::sam::get_song(&sam_pool, ev.song_id)
@@ -1454,16 +1543,25 @@ async fn process_track_completions(
 
         if let Some(queue_id) = ev.queue_id {
             completed_queue_ids.push(queue_id);
-            if let Err(err) = crate::db::sam::complete_track(&sam_pool, queue_id, &song).await {
+            if let Err(err) =
+                crate::db::sam::complete_track(&sam_pool, queue_id, &song, listener_snapshot).await
+            {
                 log::warn!(
                     "Failed to complete queue track (queue_id={}, song_id={}): {}",
                     queue_id,
                     ev.song_id,
                     err
                 );
-                let _ = crate::db::sam::add_to_history(&sam_pool, &song).await;
+                let _ = crate::db::sam::add_to_history_with_listeners(
+                    &sam_pool,
+                    &song,
+                    listener_snapshot,
+                )
+                .await;
             }
-        } else if let Err(err) = crate::db::sam::add_to_history(&sam_pool, &song).await {
+        } else if let Err(err) =
+            crate::db::sam::add_to_history_with_listeners(&sam_pool, &song, listener_snapshot).await
+        {
             log::warn!(
                 "Failed to append history for completed track (song_id={}): {}",
                 ev.song_id,

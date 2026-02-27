@@ -10,6 +10,7 @@ use crate::{
         engine::AudioEngine,
         mic_input::{MicConfig, MicInput},
     },
+    controller::service::ControllerService,
     commands::gateway_commands::AutoPilotStatus,
     gateway::client::GatewayClient,
     gateway::remote_dj::{DjPermissions, RemoteSession},
@@ -50,6 +51,8 @@ pub struct AppState {
     pub mix_minus_enabled: Mutex<bool>,
     /// Phase 7 — System health monitor
     pub health_monitor: Arc<HealthMonitor>,
+    /// Controller runtime and MIDI integration service
+    pub controller_service: Arc<ControllerService>,
 }
 
 impl AppState {
@@ -57,6 +60,7 @@ impl AppState {
         let broadcaster = Broadcaster::new();
         let encoder_manager = EncoderManager::new(broadcaster.clone());
         let mic_input = MicInput::new(MicConfig::default());
+        let controller_service = Arc::new(ControllerService::new());
 
         Self {
             engine: Mutex::new(engine),
@@ -79,6 +83,7 @@ impl AppState {
             live_talk_active: Mutex::new(None),
             mix_minus_enabled: Mutex::new(false),
             health_monitor: Arc::new(HealthMonitor::new()),
+            controller_service,
         }
     }
 

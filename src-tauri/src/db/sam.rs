@@ -382,13 +382,17 @@ pub async fn get_history(pool: &MySqlPool, limit: u32) -> Result<Vec<HistoryEntr
 /// Write a full metadata snapshot to `historylist`.
 /// Call this when a track finishes playing. Copies metadata from `song` so the
 /// history record is correct even if the song is later edited in SAM.
-pub async fn add_to_history(pool: &MySqlPool, song: &SamSong) -> Result<(), sqlx::Error> {
+pub async fn add_to_history_with_listeners(
+    pool: &MySqlPool,
+    song: &SamSong,
+    listeners: i32,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"INSERT INTO historylist
            (songID, filename, date_played, duration,
             artist, title, album, albumyear, listeners,
             label, ISRC, UPC, songtype, requestID, overlay, songrights)
-           VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 0, ?, 'broadcast')"#,
+           VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'broadcast')"#,
     )
     .bind(song.id)
     .bind(&song.filename)
@@ -397,6 +401,7 @@ pub async fn add_to_history(pool: &MySqlPool, song: &SamSong) -> Result<(), sqlx
     .bind(&song.title)
     .bind(&song.album)
     .bind(&song.albumyear)
+    .bind(listeners.max(0))
     .bind(&song.label)
     .bind(&song.isrc)
     .bind(&song.upc)
@@ -407,15 +412,20 @@ pub async fn add_to_history(pool: &MySqlPool, song: &SamSong) -> Result<(), sqlx
     Ok(())
 }
 
+pub async fn add_to_history(pool: &MySqlPool, song: &SamSong) -> Result<(), sqlx::Error> {
+    add_to_history_with_listeners(pool, song, 0).await
+}
+
 /// Atomically complete a queue entry: removes it from `queuelist` and writes
 /// a history record to `historylist`.  Best-effort (no distributed transaction).
 pub async fn complete_track(
     pool: &MySqlPool,
     queue_id: i64,
     song: &SamSong,
+    listeners: i32,
 ) -> Result<(), sqlx::Error> {
     remove_from_queue(pool, queue_id).await?;
-    add_to_history(pool, song).await?;
+    add_to_history_with_listeners(pool, song, listeners).await?;
     Ok(())
 }
 
