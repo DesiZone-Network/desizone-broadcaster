@@ -35,6 +35,17 @@ pub async fn execute_action(app_handle: AppHandle, action: ControllerAction) {
             let _ = engine.pause(deck);
             let _ = engine.seek(deck, 0);
         }
+        ControllerAction::ToggleCue { deck } => {
+            let current = {
+                let engine = state.engine.lock().unwrap();
+                engine
+                    .get_deck_state(deck)
+                    .map(|s| s.cue_preview_enabled)
+                    .unwrap_or(false)
+            };
+            let mut engine = state.engine.lock().unwrap();
+            let _ = engine.set_deck_cue_preview_enabled(deck, !current);
+        }
         ControllerAction::SyncToOther { deck } => {
             sync_deck_to_other(&state, deck).await;
         }
@@ -50,7 +61,9 @@ pub async fn execute_action(app_handle: AppHandle, action: ControllerAction) {
         ControllerAction::ClearLoop { deck } => {
             clear_loop_preserve_position(&state, deck);
         }
-        ControllerAction::SetTempo { deck, tempo_pct, .. } => {
+        ControllerAction::SetTempo {
+            deck, tempo_pct, ..
+        } => {
             let mut engine = state.engine.lock().unwrap();
             let _ = engine.set_deck_tempo(deck, tempo_pct.clamp(-8.0, 8.0));
         }
@@ -73,6 +86,14 @@ pub async fn execute_action(app_handle: AppHandle, action: ControllerAction) {
         ControllerAction::SetMasterVolume { level, .. } => {
             let mut engine = state.engine.lock().unwrap();
             let _ = engine.set_master_level(level.clamp(0.0, 1.0));
+        }
+        ControllerAction::SetHeadphoneMix { value, .. } => {
+            let mut engine = state.engine.lock().unwrap();
+            let _ = engine.set_headphone_mix(value.clamp(-1.0, 1.0));
+        }
+        ControllerAction::SetHeadphoneLevel { level, .. } => {
+            let mut engine = state.engine.lock().unwrap();
+            let _ = engine.set_headphone_level(level.clamp(0.0, 1.0));
         }
         ControllerAction::JogNudge { deck, delta_steps } => {
             jog_nudge(&state, deck, delta_steps);
@@ -173,6 +194,7 @@ async fn sync_deck_to_other(state: &AppState, deck: DeckId) {
     };
 
     let mut target_tempo_pct = other_state.tempo_pct;
+    let mut resolved = false;
 
     if let (Some(pool), Some(this_song_id), Some(other_song_id)) =
         (&state.local_db, this_state.song_id, other_state.song_id)
@@ -192,8 +214,43 @@ async fn sync_deck_to_other(state: &AppState, deck: DeckId) {
                 && b.bpm > 0.0
             {
                 target_tempo_pct = ((b.bpm / a.bpm) - 1.0) * 100.0;
+                resolved = true;
             }
         }
+    }
+
+    // Fallback: if beatgrids are unavailable, sync by track BPM metadata.
+    if !resolved {
+        if let (Some(this_song_id), Some(other_song_id)) = (this_state.song_id, other_state.song_id)
+        {
+            let sam_pool = {
+                let guard = state.sam_db.read().await;
+                guard.clone()
+            };
+            if let Some(pool) = sam_pool {
+                let this_bpm = crate::db::sam::get_song(&pool, this_song_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|song| song.bpm as f32)
+                    .filter(|bpm| *bpm > 0.0);
+                let other_bpm = crate::db::sam::get_song(&pool, other_song_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|song| song.bpm as f32)
+                    .filter(|bpm| *bpm > 0.0);
+                if let (Some(a), Some(b)) = (this_bpm, other_bpm) {
+                    target_tempo_pct = ((b / a) - 1.0) * 100.0;
+                    resolved = true;
+                }
+            }
+        }
+    }
+
+    // Last fallback: if there is still no ratio source, copy other deck tempo offset.
+    if !resolved {
+        target_tempo_pct = other_state.tempo_pct;
     }
 
     let mut engine = state.engine.lock().unwrap();

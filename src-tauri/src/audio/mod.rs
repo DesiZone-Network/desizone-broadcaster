@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod crossfade;
 pub mod deck;
 pub mod decoder;
+pub mod device_manager;
 pub mod dsp;
 pub mod engine;
 pub mod mic_input;

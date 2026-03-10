@@ -2,10 +2,7 @@ use std::collections::HashMap;
 
 use crate::audio::crossfade::DeckId;
 
-use super::{
-    starlight_profile as map,
-    types::ControllerAction,
-};
+use super::{starlight_profile as map, types::ControllerAction};
 
 #[derive(Default)]
 pub struct DecodeState {
@@ -34,12 +31,11 @@ pub fn decode_message(state: &mut DecodeState, message: &[u8]) -> Vec<Controller
 
     match status {
         map::DECK_A_NOTE_STATUS | map::DECK_B_NOTE_STATUS => {
-            decode_transport(status, data1)
-                .into_iter()
-                .collect()
+            decode_transport(status, data1).into_iter().collect()
         }
         map::DECK_A_SHIFT_NOTE_STATUS | map::DECK_B_SHIFT_NOTE_STATUS => {
-            decode_transport(shift_note_to_base(status), data1)
+            decode_shift_note(status, data1)
+                .or_else(|| decode_transport(shift_note_to_base(status), data1))
                 .into_iter()
                 .collect()
         }
@@ -90,7 +86,25 @@ fn decode_transport(status: u8, note: u8) -> Option<ControllerAction> {
     match note {
         map::PLAY_NOTE => Some(ControllerAction::TogglePlay { deck }),
         map::CUE_NOTE => Some(ControllerAction::CueToStart { deck }),
-        map::SYNC_NOTE => Some(ControllerAction::SyncToOther { deck }),
+        map::SYNC_NOTE | 0x04 => Some(ControllerAction::SyncToOther { deck }),
+        map::PFL_NOTE => Some(ControllerAction::ToggleCue { deck }),
+        _ => None,
+    }
+}
+
+fn decode_shift_note(status: u8, note: u8) -> Option<ControllerAction> {
+    if note != map::PFL_NOTE {
+        return None;
+    }
+    match status {
+        map::DECK_A_SHIFT_NOTE_STATUS => Some(ControllerAction::SetHeadphoneMix {
+            value: 1.0,
+            normalized: 1.0,
+        }),
+        map::DECK_B_SHIFT_NOTE_STATUS => Some(ControllerAction::SetHeadphoneMix {
+            value: -1.0,
+            normalized: 0.0,
+        }),
         _ => None,
     }
 }
@@ -146,7 +160,7 @@ fn decode_master_and_crossfader(cc: u8, value: u8) -> Option<ControllerAction> {
             normalized,
         });
     }
-    if cc != map::XFADE_CC {
+    if cc == map::MASTER_VOLUME_CC {
         let normalized = (value as f32 / 127.0).clamp(0.0, 1.0);
         let level = normalized.clamp(0.0, 1.0);
         return Some(ControllerAction::SetMasterVolume { level, normalized });
@@ -154,18 +168,19 @@ fn decode_master_and_crossfader(cc: u8, value: u8) -> Option<ControllerAction> {
     None
 }
 
-fn decode_deck_cc(
-    state: &mut DecodeState,
-    status: u8,
-    cc: u8,
-    value: u8,
-) -> Vec<ControllerAction> {
+fn decode_deck_cc(state: &mut DecodeState, status: u8, cc: u8, value: u8) -> Vec<ControllerAction> {
     let Some(deck) = deck_from_cc_status(status) else {
         return Vec::new();
     };
 
+    if cc == map::SYNC_NOTE && value >= 0x40 {
+        return vec![ControllerAction::SyncToOther { deck }];
+    }
+
     match cc {
-        map::CHANNEL_GAIN_CC if status == map::DECK_A_CC_STATUS || status == map::DECK_B_CC_STATUS => {
+        map::CHANNEL_GAIN_CC
+            if status == map::DECK_A_CC_STATUS || status == map::DECK_B_CC_STATUS =>
+        {
             let normalized = (value as f32 / 127.0).clamp(0.0, 1.0);
             vec![ControllerAction::SetGain {
                 deck,
@@ -272,8 +287,14 @@ mod tests {
     #[test]
     fn decode_tempo_14_bit() {
         let mut state = DecodeState::default();
-        let _ = decode_message(&mut state, &[map::DECK_A_CC_STATUS, map::TEMPO_MSB_CC, 0x7F]);
-        let actions = decode_message(&mut state, &[map::DECK_A_CC_STATUS, map::TEMPO_LSB_CC, 0x7F]);
+        let _ = decode_message(
+            &mut state,
+            &[map::DECK_A_CC_STATUS, map::TEMPO_MSB_CC, 0x7F],
+        );
+        let actions = decode_message(
+            &mut state,
+            &[map::DECK_A_CC_STATUS, map::TEMPO_LSB_CC, 0x7F],
+        );
         assert!(matches!(
             actions.first(),
             Some(ControllerAction::SetTempo {
@@ -324,10 +345,43 @@ mod tests {
             }) if (*amount + 1.0).abs() < 0.02
         ));
 
-        let master = decode_message(&mut state, &[map::XFADE_STATUS, map::MASTER_VOLUME_CC, 0x40]);
+        let master = decode_message(
+            &mut state,
+            &[map::XFADE_STATUS, map::MASTER_VOLUME_CC, 0x40],
+        );
         assert!(matches!(
             master.first(),
             Some(ControllerAction::SetMasterVolume { .. })
         ));
+    }
+
+    #[test]
+    fn decode_cue_and_shift_cue_mix() {
+        let mut state = DecodeState::default();
+
+        let cue = decode_message(&mut state, &[map::DECK_A_NOTE_STATUS, map::PFL_NOTE, 0x7F]);
+        assert!(matches!(
+            cue.first(),
+            Some(ControllerAction::ToggleCue {
+                deck: DeckId::DeckA
+            })
+        ));
+
+        let shift = decode_message(
+            &mut state,
+            &[map::DECK_B_SHIFT_NOTE_STATUS, map::PFL_NOTE, 0x7F],
+        );
+        assert!(matches!(
+            shift.first(),
+            Some(ControllerAction::SetHeadphoneMix { value, .. }) if (*value + 1.0).abs() < 0.01
+        ));
+    }
+
+    #[test]
+    fn decode_master_crossfader_ignores_unmapped_cc() {
+        let mut state = DecodeState::default();
+
+        let actions = decode_message(&mut state, &[map::XFADE_STATUS, 0x7F, 0x55]);
+        assert!(actions.is_empty(), "unmapped CC should not create actions");
     }
 }

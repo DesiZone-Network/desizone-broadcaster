@@ -150,6 +150,43 @@ export interface MonitorRoutingConfig {
   cue_mix_mode: string;
   cue_level: number;
   master_level: number;
+  auto_fallback: boolean;
+}
+
+export type AudioOutputMode =
+  | "single_device_stereo"
+  | "single_device_four_channel"
+  | "dual_device_split";
+
+export interface AudioOutputDevice {
+  id: string;
+  name: string;
+  channels: number[];
+  sample_rates: number[];
+  is_starlight: boolean;
+  is_default: boolean;
+}
+
+export interface AudioOutputRoutingConfig {
+  mode: AudioOutputMode;
+  master_device_id: string | null;
+  cue_device_id: string | null;
+  starlight_preferred: boolean;
+  auto_fallback: boolean;
+}
+
+export interface AudioOutputStatus {
+  active_mode: AudioOutputMode;
+  master_device_id: string | null;
+  master_device_name: string | null;
+  cue_device_id: string | null;
+  cue_available: boolean;
+  fallback_active: boolean;
+  last_error: string | null;
+}
+
+export interface AudioOutputErrorEvent {
+  message: string;
 }
 
 export interface ControllerDevice {
@@ -346,6 +383,30 @@ export const setMasterLevel = (level: number) =>
 
 export const getMasterLevel = () =>
   invoke<number>("get_master_level");
+
+export const setHeadphoneMix = (value: number) =>
+  invoke<void>("set_headphone_mix", { value });
+
+export const setHeadphoneLevel = (value: number) =>
+  invoke<void>("set_headphone_level", { value });
+
+export const getHeadphoneMix = () =>
+  invoke<number>("get_headphone_mix");
+
+export const getHeadphoneLevel = () =>
+  invoke<number>("get_headphone_level");
+
+export const listAudioOutputDevices = () =>
+  invoke<AudioOutputDevice[]>("list_audio_output_devices");
+
+export const getAudioOutputStatus = () =>
+  invoke<AudioOutputStatus>("get_audio_output_status");
+
+export const applyAudioOutputRouting = (config: AudioOutputRoutingConfig) =>
+  invoke<AudioOutputStatus>("apply_audio_output_routing", { config });
+
+export const setDeckCueEnabled = (deck: DeckId, enabled: boolean) =>
+  invoke<void>("set_deck_cue_enabled", { deck, enabled });
 
 export const setDeckLoop = (deck: DeckId, startMs: number, endMs: number) =>
   invoke<void>("set_deck_loop", { deck, startMs, endMs });
@@ -814,6 +875,16 @@ export const onControllerError = (
   cb: (event: ControllerErrorEvent) => void
 ): Promise<UnlistenFn> =>
   listen<ControllerErrorEvent>("controller_error", (e) => cb(e.payload));
+
+export const onAudioOutputStatusChanged = (
+  cb: (status: AudioOutputStatus) => void
+): Promise<UnlistenFn> =>
+  listen<AudioOutputStatus>("audio_output_status_changed", (e) => cb(e.payload));
+
+export const onAudioOutputError = (
+  cb: (event: AudioOutputErrorEvent) => void
+): Promise<UnlistenFn> =>
+  listen<AudioOutputErrorEvent>("audio_output_error", (e) => cb(e.payload));
 
 export const onRequestReceived = (
   cb: (request: RequestItem) => void

@@ -64,13 +64,33 @@ pub struct ControllerErrorEvent {
 
 #[derive(Debug, Clone)]
 pub enum ControllerAction {
-    TogglePlay { deck: DeckId },
-    CueToStart { deck: DeckId },
-    SyncToOther { deck: DeckId },
-    HotCueTrigger { deck: DeckId, slot: u8 },
-    HotCueSet { deck: DeckId, slot: u8 },
-    SetBeatLoop { deck: DeckId, beats: u8 },
-    ClearLoop { deck: DeckId },
+    TogglePlay {
+        deck: DeckId,
+    },
+    ToggleCue {
+        deck: DeckId,
+    },
+    CueToStart {
+        deck: DeckId,
+    },
+    SyncToOther {
+        deck: DeckId,
+    },
+    HotCueTrigger {
+        deck: DeckId,
+        slot: u8,
+    },
+    HotCueSet {
+        deck: DeckId,
+        slot: u8,
+    },
+    SetBeatLoop {
+        deck: DeckId,
+        beats: u8,
+    },
+    ClearLoop {
+        deck: DeckId,
+    },
     SetTempo {
         deck: DeckId,
         tempo_pct: f32,
@@ -96,6 +116,14 @@ pub enum ControllerAction {
         normalized: f32,
     },
     SetMasterVolume {
+        level: f32,
+        normalized: f32,
+    },
+    SetHeadphoneMix {
+        value: f32,
+        normalized: f32,
+    },
+    SetHeadphoneLevel {
         level: f32,
         normalized: f32,
     },
@@ -125,6 +153,12 @@ impl ControllerAction {
             }
             ControllerAction::SetMasterVolume { normalized, .. } => {
                 Some(("master_level".to_string(), *normalized))
+            }
+            ControllerAction::SetHeadphoneMix { normalized, .. } => {
+                Some(("headphone_mix".to_string(), *normalized))
+            }
+            ControllerAction::SetHeadphoneLevel { normalized, .. } => {
+                Some(("headphone_level".to_string(), *normalized))
             }
             _ => None,
         }

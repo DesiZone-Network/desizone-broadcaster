@@ -1,8 +1,13 @@
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::{
-    audio::{crossfade::DeckId, engine::DeckStateEvent},
+    audio::{
+        crossfade::DeckId,
+        device_manager::{AudioOutputDevice, AudioOutputRoutingConfig, AudioOutputStatus},
+        engine::DeckStateEvent,
+    },
+    db::local::MonitorRoutingConfig,
     state::AppState,
 };
 
@@ -139,7 +144,11 @@ pub async fn set_deck_filter(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let deck_id = parse_deck(&deck)?;
-    state.engine.lock().unwrap().set_deck_filter(deck_id, amount)
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_deck_filter(deck_id, amount)
 }
 
 #[tauri::command]
@@ -150,6 +159,107 @@ pub async fn set_master_level(level: f32, state: State<'_, AppState>) -> Result<
 #[tauri::command]
 pub async fn get_master_level(state: State<'_, AppState>) -> Result<f32, String> {
     Ok(state.engine.lock().unwrap().get_master_level())
+}
+
+#[tauri::command]
+pub async fn set_headphone_mix(value: f32, state: State<'_, AppState>) -> Result<(), String> {
+    state.engine.lock().unwrap().set_headphone_mix(value)
+}
+
+#[tauri::command]
+pub async fn set_headphone_level(value: f32, state: State<'_, AppState>) -> Result<(), String> {
+    state.engine.lock().unwrap().set_headphone_level(value)
+}
+
+#[tauri::command]
+pub async fn get_headphone_mix(state: State<'_, AppState>) -> Result<f32, String> {
+    Ok(state.engine.lock().unwrap().get_headphone_mix())
+}
+
+#[tauri::command]
+pub async fn get_headphone_level(state: State<'_, AppState>) -> Result<f32, String> {
+    Ok(state.engine.lock().unwrap().get_headphone_level())
+}
+
+#[tauri::command]
+pub async fn set_deck_cue_enabled(
+    deck: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let deck_id = parse_deck(&deck)?;
+    state
+        .engine
+        .lock()
+        .unwrap()
+        .set_deck_cue_preview_enabled(deck_id, enabled)
+}
+
+#[tauri::command]
+pub async fn list_audio_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
+    crate::audio::engine::AudioEngine::list_audio_output_devices()
+}
+
+#[tauri::command]
+pub async fn get_audio_output_status(
+    state: State<'_, AppState>,
+) -> Result<AudioOutputStatus, String> {
+    Ok(state.engine.lock().unwrap().get_audio_output_status())
+}
+
+#[tauri::command]
+pub async fn apply_audio_output_routing(
+    config: AudioOutputRoutingConfig,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AudioOutputStatus, String> {
+    let auto_fallback = config.auto_fallback;
+    let (cue_level, master_level) = {
+        let engine = state.engine.lock().unwrap();
+        (engine.get_headphone_level(), engine.get_master_level())
+    };
+
+    let status = state
+        .engine
+        .lock()
+        .unwrap()
+        .apply_audio_output_routing(config)?;
+
+    if let Some(pool) = &state.local_db {
+        let monitor_cfg = MonitorRoutingConfig {
+            master_device_id: status.master_device_id.clone(),
+            cue_device_id: status.cue_device_id.clone(),
+            cue_mix_mode: match status.active_mode {
+                crate::audio::device_manager::AudioOutputMode::SingleDeviceFourChannel => {
+                    "single_device_four_channel".to_string()
+                }
+                crate::audio::device_manager::AudioOutputMode::DualDeviceSplit => {
+                    "dual_device_split".to_string()
+                }
+                crate::audio::device_manager::AudioOutputMode::SingleDeviceStereo => {
+                    "single_device_stereo".to_string()
+                }
+            },
+            cue_level,
+            master_level,
+            auto_fallback,
+        };
+        let pool = pool.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::db::local::save_monitor_routing_config(&pool, &monitor_cfg).await;
+        });
+    }
+
+    let _ = app.emit("audio_output_status_changed", status.clone());
+    if let Some(msg) = status.last_error.clone() {
+        let _ = app.emit(
+            "audio_output_error",
+            serde_json::json!({
+                "message": msg
+            }),
+        );
+    }
+    Ok(status)
 }
 
 #[tauri::command]

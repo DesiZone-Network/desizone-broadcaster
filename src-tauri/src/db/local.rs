@@ -190,7 +190,8 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             cue_device_id    TEXT,
             cue_mix_mode     TEXT    NOT NULL DEFAULT 'split',
             cue_level        REAL    NOT NULL DEFAULT 1.0,
-            master_level     REAL    NOT NULL DEFAULT 1.0
+            master_level     REAL    NOT NULL DEFAULT 1.0,
+            auto_fallback    INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS controller_config (
@@ -327,6 +328,11 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             .await;
     let _ = sqlx::query(
         "ALTER TABLE cue_points ADD COLUMN updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE monitor_routing_config ADD COLUMN auto_fallback INTEGER NOT NULL DEFAULT 1",
     )
     .execute(pool)
     .await;
@@ -1080,12 +1086,14 @@ fn map_stem_analysis_row(r: sqlx::sqlite::SqliteRow) -> StemAnalysis {
 // ── Cue monitor routing ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MonitorRoutingConfig {
     pub master_device_id: Option<String>,
     pub cue_device_id: Option<String>,
     pub cue_mix_mode: String,
     pub cue_level: f32,
     pub master_level: f32,
+    pub auto_fallback: bool,
 }
 
 impl Default for MonitorRoutingConfig {
@@ -1096,6 +1104,7 @@ impl Default for MonitorRoutingConfig {
             cue_mix_mode: "split".to_string(),
             cue_level: 1.0,
             master_level: 1.0,
+            auto_fallback: true,
         }
     }
 }
@@ -1104,7 +1113,7 @@ pub async fn get_monitor_routing_config(
     pool: &SqlitePool,
 ) -> Result<MonitorRoutingConfig, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT master_device_id, cue_device_id, cue_mix_mode, cue_level, master_level
+        "SELECT master_device_id, cue_device_id, cue_mix_mode, cue_level, master_level, auto_fallback
          FROM monitor_routing_config WHERE id = 1",
     )
     .fetch_optional(pool)
@@ -1117,6 +1126,7 @@ pub async fn get_monitor_routing_config(
             cue_mix_mode: r.get("cue_mix_mode"),
             cue_level: r.get::<f64, _>("cue_level") as f32,
             master_level: r.get::<f64, _>("master_level") as f32,
+            auto_fallback: r.get::<i64, _>("auto_fallback") != 0,
         }),
         None => Ok(MonitorRoutingConfig::default()),
     }
@@ -1129,14 +1139,15 @@ pub async fn save_monitor_routing_config(
     sqlx::query(
         r#"
         INSERT INTO monitor_routing_config
-            (id, master_device_id, cue_device_id, cue_mix_mode, cue_level, master_level)
-        VALUES (1, ?, ?, ?, ?, ?)
+            (id, master_device_id, cue_device_id, cue_mix_mode, cue_level, master_level, auto_fallback)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             master_device_id = excluded.master_device_id,
             cue_device_id = excluded.cue_device_id,
             cue_mix_mode = excluded.cue_mix_mode,
             cue_level = excluded.cue_level,
-            master_level = excluded.master_level
+            master_level = excluded.master_level,
+            auto_fallback = excluded.auto_fallback
         "#,
     )
     .bind(&config.master_device_id)
@@ -1144,6 +1155,7 @@ pub async fn save_monitor_routing_config(
     .bind(&config.cue_mix_mode)
     .bind(config.cue_level as f64)
     .bind(config.master_level as f64)
+    .bind(if config.auto_fallback { 1 } else { 0 })
     .execute(pool)
     .await?;
     Ok(())

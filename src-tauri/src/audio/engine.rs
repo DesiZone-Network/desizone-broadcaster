@@ -16,6 +16,7 @@ use crate::db::local::MonitorRoutingConfig;
 use super::{
     crossfade::{CrossfadeConfig, CrossfadeState, CrossfadeTriggerMode, DeckId},
     deck::{AttachOp, Deck, DeckState, PreparedTrack, TrackCompletion},
+    device_manager::{self, AudioOutputMode, AudioOutputRoutingConfig, AudioOutputStatus},
     dsp::{
         pipeline::{ChannelPipeline, PipelineSettings},
         stem_filter::{StemFilterConfig, StemFilterMode},
@@ -92,17 +93,24 @@ struct RtState {
     deck_filter_amount: HashMap<DeckId, f32>,
     cue_preview_enabled: HashMap<DeckId, bool>,
     cue_split_active: bool,
+    cue_available: bool,
     cue_level: f32,
+    headphone_mix: f32,
     master_level: f32,
     sample_rate: u32,
+    output_channels: usize,
     // Per-channel scratch buffers (avoid alloc in callback)
     buf_deck_a: Vec<f32>,
     buf_deck_b: Vec<f32>,
+    buf_deck_a_cue_tap: Vec<f32>,
+    buf_deck_b_cue_tap: Vec<f32>,
     buf_sound_fx: Vec<f32>,
     buf_aux1: Vec<f32>,
     buf_aux2: Vec<f32>,
     buf_voice_fx: Vec<f32>,
     buf_silence: Vec<f32>,
+    buf_master: Vec<f32>,
+    buf_cue: Vec<f32>,
     // Encoder ring buffer producer (to stream/icecast thread)
     encoder_prod: ringbuf::HeapProd<f32>,
 }
@@ -170,6 +178,12 @@ enum EngineCmd {
         deck: DeckId,
         enabled: bool,
     },
+    SetHeadphoneMix {
+        value: f32,
+    },
+    SetHeadphoneLevel {
+        value: f32,
+    },
     SetMonitorRoutingConfig(MonitorRoutingConfig),
 }
 
@@ -183,6 +197,8 @@ pub struct AudioEngine {
     // Shared state accessible from both the main thread (for queries) and
     // the CPAL callback (for audio).
     rt_state: Arc<Mutex<RtState>>,
+    routing_config: AudioOutputRoutingConfig,
+    output_status: AudioOutputStatus,
     #[allow(dead_code)]
     sample_rate: u32,
 }
@@ -194,6 +210,10 @@ impl AudioEngine {
     /// Initialise and start the CPAL output stream.
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
+        let default_name = host
+            .default_output_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_default();
         let device = host
             .default_output_device()
             .ok_or("No default audio output device found")?;
@@ -204,10 +224,19 @@ impl AudioEngine {
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels() as usize;
+        let device_name = device.name().unwrap_or_default();
+        let device_id = device_manager::list_audio_output_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|d| d.name == device_name || (d.is_default && d.name == default_name))
+                    .map(|d| d.id)
+            });
 
         log::info!(
             "Audio device: {} | sample rate: {} | channels: {}",
-            device.name().unwrap_or_default(),
+            device_name,
             sample_rate,
             channels
         );
@@ -287,16 +316,23 @@ impl AudioEngine {
                 m
             },
             cue_split_active: false,
+            cue_available: channels >= 4,
             cue_level: 1.0,
+            headphone_mix: -1.0,
             master_level: 1.0,
             sample_rate,
+            output_channels: channels.max(2),
             buf_deck_a: Vec::new(),
             buf_deck_b: Vec::new(),
+            buf_deck_a_cue_tap: Vec::new(),
+            buf_deck_b_cue_tap: Vec::new(),
             buf_sound_fx: Vec::new(),
             buf_aux1: Vec::new(),
             buf_aux2: Vec::new(),
             buf_voice_fx: Vec::new(),
             buf_silence: Vec::new(),
+            buf_master: Vec::new(),
+            buf_cue: Vec::new(),
             encoder_prod: enc_prod,
         }));
 
@@ -312,6 +348,20 @@ impl AudioEngine {
             encoder_consumer: Some(enc_cons),
             cmd_tx: cmd_prod,
             rt_state: rt_arc,
+            routing_config: AudioOutputRoutingConfig::default(),
+            output_status: AudioOutputStatus {
+                active_mode: if channels >= 4 {
+                    AudioOutputMode::SingleDeviceFourChannel
+                } else {
+                    AudioOutputMode::SingleDeviceStereo
+                },
+                master_device_id: device_id.clone(),
+                master_device_name: Some(device_name),
+                cue_device_id: device_id,
+                cue_available: channels >= 4,
+                fallback_active: false,
+                last_error: None,
+            },
             sample_rate,
         })
     }
@@ -528,8 +578,136 @@ impl AudioEngine {
         self.send_cmd(EngineCmd::SetDeckCuePreview { deck, enabled })
     }
 
+    pub fn set_headphone_mix(&mut self, value: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetHeadphoneMix {
+            value: value.clamp(-1.0, 1.0),
+        })
+    }
+
+    pub fn set_headphone_level(&mut self, value: f32) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetHeadphoneLevel {
+            value: value.clamp(0.0, 1.0),
+        })
+    }
+
     pub fn set_monitor_routing_config(&mut self, config: MonitorRoutingConfig) {
+        self.routing_config.mode = match config.cue_mix_mode.as_str() {
+            "single_device_four_channel" => AudioOutputMode::SingleDeviceFourChannel,
+            "dual_device_split" => AudioOutputMode::DualDeviceSplit,
+            _ => AudioOutputMode::SingleDeviceStereo,
+        };
+        self.routing_config.master_device_id = config.master_device_id.clone();
+        self.routing_config.cue_device_id = config.cue_device_id.clone();
+        self.routing_config.auto_fallback = config.auto_fallback;
         let _ = self.send_cmd(EngineCmd::SetMonitorRoutingConfig(config));
+    }
+
+    pub fn list_audio_output_devices() -> Result<Vec<device_manager::AudioOutputDevice>, String> {
+        device_manager::list_audio_output_devices()
+    }
+
+    pub fn get_audio_output_status(&self) -> AudioOutputStatus {
+        self.output_status.clone()
+    }
+
+    pub fn apply_audio_output_routing(
+        &mut self,
+        mut config: AudioOutputRoutingConfig,
+    ) -> Result<AudioOutputStatus, String> {
+        let original = config.clone();
+        let selected = device_manager::select_output_stream(&config);
+        let (selection, warning, had_explicit_selection) = match selected {
+            Ok(ok) => ok,
+            Err(err) => {
+                if !config.auto_fallback {
+                    return Err(err);
+                }
+                config.mode = AudioOutputMode::SingleDeviceStereo;
+                config.master_device_id = None;
+                let (fallback_sel, warn, _) = device_manager::select_output_stream(&config)?;
+                let fallback_warning = Some(format!("{err}; fallback engaged"));
+                (
+                    fallback_sel,
+                    fallback_warning.or(warn),
+                    had_explicit_selection(&original),
+                )
+            }
+        };
+
+        let current_channels = {
+            let rt = self.rt_state.lock().unwrap();
+            rt.output_channels
+        };
+        let should_rebuild = self.output_status.master_device_id.as_deref()
+            != Some(selection.device_id.as_str())
+            || self.sample_rate != selection.config.sample_rate.0
+            || current_channels != selection.config.channels as usize;
+
+        if should_rebuild {
+            self.rebuild_stream(selection.device, &selection.config)?;
+        }
+
+        {
+            let mut rt = self.rt_state.lock().unwrap();
+            rt.sample_rate = selection.config.sample_rate.0;
+            rt.output_channels = selection.config.channels as usize;
+            rt.cue_available = selection.cue_available;
+            let wants_split = matches!(
+                config.mode,
+                AudioOutputMode::SingleDeviceFourChannel | AudioOutputMode::DualDeviceSplit
+            );
+            rt.cue_split_active = wants_split && rt.cue_available;
+            if !rt.cue_available {
+                rt.cue_preview_enabled.insert(DeckId::DeckA, false);
+                rt.cue_preview_enabled.insert(DeckId::DeckB, false);
+            }
+        }
+
+        self.sample_rate = selection.config.sample_rate.0;
+        self.routing_config = config.clone();
+        let status = AudioOutputStatus {
+            active_mode: selection.active_mode,
+            master_device_id: Some(selection.device_id.clone()),
+            master_device_name: Some(selection.device_name.clone()),
+            cue_device_id: if selection.cue_available {
+                Some(selection.device_id.clone())
+            } else {
+                None
+            },
+            cue_available: selection.cue_available,
+            fallback_active: warning.is_some()
+                || (had_explicit_selection && !selection.cue_available),
+            last_error: warning,
+        };
+        self.output_status = status.clone();
+        Ok(status)
+    }
+
+    pub fn maybe_auto_fallback_output(&mut self) -> Option<AudioOutputStatus> {
+        if !self.routing_config.auto_fallback {
+            return None;
+        }
+        let Some(active_id) = self.output_status.master_device_id.clone() else {
+            return None;
+        };
+        let devices = device_manager::list_audio_output_devices().ok()?;
+        if devices.iter().any(|d| d.id == active_id) {
+            return None;
+        }
+        let mut fallback_cfg = self.routing_config.clone();
+        fallback_cfg.mode = AudioOutputMode::SingleDeviceStereo;
+        fallback_cfg.master_device_id = None;
+        match self.apply_audio_output_routing(fallback_cfg) {
+            Ok(mut status) => {
+                status.fallback_active = true;
+                status.last_error = Some(
+                    "Active output device disconnected; switched to default output".to_string(),
+                );
+                self.output_status = status.clone();
+                Some(status)
+            }
+            Err(_) => None,
+        }
     }
 
     pub fn get_crossfade_config(&self) -> CrossfadeConfig {
@@ -589,6 +767,14 @@ impl AudioEngine {
 
     pub fn get_master_level(&self) -> f32 {
         self.rt_state.lock().unwrap().master_level
+    }
+
+    pub fn get_headphone_mix(&self) -> f32 {
+        self.rt_state.lock().unwrap().headphone_mix
+    }
+
+    pub fn get_headphone_level(&self) -> f32 {
+        self.rt_state.lock().unwrap().cue_level
     }
 
     pub fn take_track_completions(&self) -> Vec<TrackCompletionEvent> {
@@ -652,6 +838,20 @@ impl AudioEngine {
             .map_err(|_| "Command queue full".to_string())
     }
 
+    fn rebuild_stream(&mut self, device: Device, config: &StreamConfig) -> Result<(), String> {
+        let cmd_rb = HeapRb::<EngineCmd>::new(Self::CMD_RING_SIZE);
+        let (cmd_prod, cmd_cons) = cmd_rb.split();
+        self.cmd_tx = cmd_prod;
+
+        let rt_arc_cb = Arc::clone(&self.rt_state);
+        let stream = Self::build_stream(&device, config, rt_arc_cb, cmd_cons)?;
+        stream
+            .play()
+            .map_err(|e| format!("Stream play error: {e}"))?;
+        self._stream = Some(stream);
+        Ok(())
+    }
+
     fn build_stream(
         device: &Device,
         config: &StreamConfig,
@@ -673,6 +873,10 @@ impl AudioEngine {
 
         Ok(stream)
     }
+}
+
+fn had_explicit_selection(config: &AudioOutputRoutingConfig) -> bool {
+    config.master_device_id.is_some()
 }
 
 // SAFETY: AudioEngine holds a cpal::Stream which is !Send on some platforms.
@@ -702,22 +906,36 @@ fn audio_callback(
     // Process pending commands (non-blocking)
     process_commands(&mut rt, cmd_cons);
 
-    let len = output.len();
+    let out_channels = rt.output_channels.max(2);
+    if output.is_empty() || output.len() % out_channels != 0 {
+        output.fill(0.0);
+        return;
+    }
+    let render_frames = output.len() / out_channels;
+    let stereo_len = render_frames * 2;
 
     // Resize scratch buffers if needed (only happens on first call or config change)
-    if rt.buf_deck_a.len() != len {
-        rt.buf_deck_a.resize(len, 0.0);
-        rt.buf_deck_b.resize(len, 0.0);
-        rt.buf_sound_fx.resize(len, 0.0);
-        rt.buf_aux1.resize(len, 0.0);
-        rt.buf_aux2.resize(len, 0.0);
-        rt.buf_voice_fx.resize(len, 0.0);
-        rt.buf_silence.resize(len, 0.0);
+    if rt.buf_deck_a.len() != stereo_len {
+        rt.buf_deck_a.resize(stereo_len, 0.0);
+        rt.buf_deck_b.resize(stereo_len, 0.0);
+        rt.buf_deck_a_cue_tap.resize(stereo_len, 0.0);
+        rt.buf_deck_b_cue_tap.resize(stereo_len, 0.0);
+        rt.buf_sound_fx.resize(stereo_len, 0.0);
+        rt.buf_aux1.resize(stereo_len, 0.0);
+        rt.buf_aux2.resize(stereo_len, 0.0);
+        rt.buf_voice_fx.resize(stereo_len, 0.0);
+        rt.buf_silence.resize(stereo_len, 0.0);
+        rt.buf_master.resize(stereo_len, 0.0);
+        rt.buf_cue.resize(stereo_len, 0.0);
     }
     rt.buf_silence.fill(0.0);
+    rt.buf_master.fill(0.0);
+    rt.buf_cue.fill(0.0);
+    rt.buf_deck_a_cue_tap.fill(0.0);
+    rt.buf_deck_b_cue_tap.fill(0.0);
 
     // ── Crossfade gain computation ──────────────────────────────────────
-    let frames = (len / 2) as u64;
+    let frames = render_frames as u64;
     // Capture endpoints before advance so completion handling can still stop
     // outgoing / promote incoming on the exact callback where fade reaches 100%.
     let (outgoing_id, incoming_id) = (rt.crossfade.outgoing(), rt.crossfade.incoming());
@@ -732,15 +950,24 @@ fn audio_callback(
     // rt.decks is mutably borrowed triggers E0502.
     let device_sr = rt.sample_rate;
     let mut force_crossfade_complete = false;
-    for (id, buf) in [
-        (DeckId::DeckA, &mut rt.buf_deck_a as *mut Vec<f32>),
-        (DeckId::DeckB, &mut rt.buf_deck_b as *mut Vec<f32>),
-        (DeckId::SoundFx, &mut rt.buf_sound_fx as *mut Vec<f32>),
-        (DeckId::Aux1, &mut rt.buf_aux1 as *mut Vec<f32>),
-        (DeckId::Aux2, &mut rt.buf_aux2 as *mut Vec<f32>),
-        (DeckId::VoiceFx, &mut rt.buf_voice_fx as *mut Vec<f32>),
+    for (id, buf, cue_tap) in [
+        (
+            DeckId::DeckA,
+            &mut rt.buf_deck_a as *mut Vec<f32>,
+            Some(&mut rt.buf_deck_a_cue_tap as *mut Vec<f32>),
+        ),
+        (
+            DeckId::DeckB,
+            &mut rt.buf_deck_b as *mut Vec<f32>,
+            Some(&mut rt.buf_deck_b_cue_tap as *mut Vec<f32>),
+        ),
+        (DeckId::SoundFx, &mut rt.buf_sound_fx as *mut Vec<f32>, None),
+        (DeckId::Aux1, &mut rt.buf_aux1 as *mut Vec<f32>, None),
+        (DeckId::Aux2, &mut rt.buf_aux2 as *mut Vec<f32>, None),
+        (DeckId::VoiceFx, &mut rt.buf_voice_fx as *mut Vec<f32>, None),
     ] {
         let buf = unsafe { &mut *buf };
+        let cue_tap = cue_tap.map(|ptr| unsafe { &mut *ptr });
         if let Some(deck) = rt.decks.get_mut(&id) {
             if crossfade_active {
                 // Active auto/timed fade owns Deck A/B crossfade gain.
@@ -765,7 +992,10 @@ fn audio_callback(
                     _ => deck.xfade_gain = 1.0,
                 }
             }
-            deck.fill_buffer(buf, device_sr);
+            match cue_tap {
+                Some(tap) => deck.fill_buffer_with_tap(buf, device_sr, Some(tap.as_mut_slice())),
+                None => deck.fill_buffer(buf, device_sr),
+            }
             if matches!(deck.state, DeckState::Playing | DeckState::Crossfading) && deck.is_eof() {
                 if crossfade_active && Some(id) == outgoing_id {
                     force_crossfade_complete = true;
@@ -774,6 +1004,9 @@ fn audio_callback(
             }
         } else {
             buf.fill(0.0);
+            if let Some(tap) = cue_tap {
+                tap.fill(0.0);
+            }
         }
     }
     if force_crossfade_complete {
@@ -798,10 +1031,12 @@ fn audio_callback(
     // ── Mix into master ──────────────────────────────────────────────────
     // SAFETY: we hold an exclusive &mut RtState from try_lock().
     // The buf_* fields and mixer.mix_into are disjoint fields; no aliasing.
-    let (a, b, sfx, aux1, aux2, vfx, silence) = unsafe {
+    let (a, b, a_cue_tap, b_cue_tap, sfx, aux1, aux2, vfx, silence) = unsafe {
         (
             std::slice::from_raw_parts(rt.buf_deck_a.as_ptr(), rt.buf_deck_a.len()),
             std::slice::from_raw_parts(rt.buf_deck_b.as_ptr(), rt.buf_deck_b.len()),
+            std::slice::from_raw_parts(rt.buf_deck_a_cue_tap.as_ptr(), rt.buf_deck_a_cue_tap.len()),
+            std::slice::from_raw_parts(rt.buf_deck_b_cue_tap.as_ptr(), rt.buf_deck_b_cue_tap.len()),
             std::slice::from_raw_parts(rt.buf_sound_fx.as_ptr(), rt.buf_sound_fx.len()),
             std::slice::from_raw_parts(rt.buf_aux1.as_ptr(), rt.buf_aux1.len()),
             std::slice::from_raw_parts(rt.buf_aux2.as_ptr(), rt.buf_aux2.len()),
@@ -813,30 +1048,106 @@ fn audio_callback(
         .cue_preview_enabled
         .get(&DeckId::DeckA)
         .copied()
-        .unwrap_or(false)
-        && rt.cue_split_active;
+        .unwrap_or(false);
     let cue_b = rt
         .cue_preview_enabled
         .get(&DeckId::DeckB)
         .copied()
-        .unwrap_or(false)
-        && rt.cue_split_active;
-    let a_mix = if cue_a { silence } else { a };
-    let b_mix = if cue_b { silence } else { b };
-    rt.mixer
-        .mix_into(output, a_mix, b_mix, sfx, aux1, aux2, vfx);
-    if (rt.master_level - 1.0).abs() > 1e-6 {
-        for s in output.iter_mut() {
-            *s *= rt.master_level;
+        .unwrap_or(false);
+    let split_available = rt.cue_split_active && rt.cue_available && out_channels >= 4;
+    let a_mix = if !split_available && cue_a {
+        silence
+    } else {
+        a
+    };
+    let b_mix = if !split_available && cue_b {
+        silence
+    } else {
+        b
+    };
+    // SAFETY: mixer and buf_master are disjoint RtState fields.
+    unsafe {
+        let mixer = &mut *(&mut rt.mixer as *mut Mixer);
+        let master = &mut *(&mut rt.buf_master as *mut Vec<f32>);
+        mixer.mix_into(master, a_mix, b_mix, sfx, aux1, aux2, vfx);
+    }
+    let master_level = rt.master_level;
+    if (master_level - 1.0).abs() > 1e-6 {
+        for s in rt.buf_master.iter_mut() {
+            *s *= master_level;
         }
     }
 
     // ── Master DSP (limiter / output chain) ─────────────────────────────
-    rt.master_pipeline.process(output);
+    // SAFETY: master_pipeline and buf_master are disjoint RtState fields.
+    unsafe {
+        let pipeline = &mut *(&mut rt.master_pipeline as *mut ChannelPipeline);
+        let master = &mut *(&mut rt.buf_master as *mut Vec<f32>);
+        pipeline.process(master);
+    }
+
+    // Build cue bus only when split output is available.
+    if split_available {
+        if cue_a {
+            accumulate_stereo(&mut rt.buf_cue, a_cue_tap);
+        }
+        if cue_b {
+            accumulate_stereo(&mut rt.buf_cue, b_cue_tap);
+        }
+        let master_blend = ((rt.headphone_mix + 1.0) * 0.5).clamp(0.0, 1.0);
+        let cue_blend = 1.0 - master_blend;
+        let cue_level = rt.cue_level;
+        // SAFETY: immutable master slice and mutable cue slice point to disjoint buffers.
+        let (master, cue) = unsafe {
+            (
+                std::slice::from_raw_parts(rt.buf_master.as_ptr(), rt.buf_master.len()),
+                std::slice::from_raw_parts_mut(rt.buf_cue.as_mut_ptr(), rt.buf_cue.len()),
+            )
+        };
+        for i in 0..cue.len() {
+            cue[i] = (cue[i] * cue_blend + master[i] * master_blend) * cue_level;
+        }
+    }
+
+    if split_available {
+        for frame in 0..render_frames {
+            let out_i = frame * out_channels;
+            let src_i = frame * 2;
+            output[out_i] = rt.buf_master[src_i];
+            if out_channels > 1 {
+                output[out_i + 1] = rt.buf_master[src_i + 1];
+            }
+            if out_channels > 2 {
+                output[out_i + 2] = rt.buf_cue[src_i];
+            }
+            if out_channels > 3 {
+                output[out_i + 3] = rt.buf_cue[src_i + 1];
+            }
+            for ch in 4..out_channels {
+                output[out_i + ch] = 0.0;
+            }
+        }
+    } else {
+        for frame in 0..render_frames {
+            let out_i = frame * out_channels;
+            let src_i = frame * 2;
+            output[out_i] = rt.buf_master[src_i];
+            if out_channels > 1 {
+                output[out_i + 1] = rt.buf_master[src_i + 1];
+            }
+            for ch in 2..out_channels {
+                output[out_i + ch] = 0.0;
+            }
+        }
+    }
 
     // ── Feed encoder ring buffer ─────────────────────────────────────────
     use ringbuf::traits::Producer as _;
-    for &s in output.iter() {
+    let master_ptr = rt.buf_master.as_ptr();
+    let master_len = rt.buf_master.len();
+    for i in 0..master_len {
+        // SAFETY: master_ptr is valid for master_len for this callback scope.
+        let s = unsafe { *master_ptr.add(i) };
         let _ = rt.encoder_prod.try_push(s);
     }
 
@@ -1004,17 +1315,31 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
             }
             EngineCmd::SetDeckCuePreview { deck, enabled } => {
                 if matches!(deck, DeckId::DeckA | DeckId::DeckB) {
-                    let effective = if rt.cue_split_active { enabled } else { false };
+                    let effective = if rt.cue_split_active || rt.cue_available {
+                        enabled
+                    } else {
+                        false
+                    };
                     rt.cue_preview_enabled.insert(deck, effective);
                 }
             }
+            EngineCmd::SetHeadphoneMix { value } => {
+                rt.headphone_mix = value.clamp(-1.0, 1.0);
+            }
+            EngineCmd::SetHeadphoneLevel { value } => {
+                rt.cue_level = value.clamp(0.0, 1.0);
+            }
             EngineCmd::SetMonitorRoutingConfig(config) => {
-                rt.cue_split_active = config
+                let wants_split = matches!(
+                    config.cue_mix_mode.as_str(),
+                    "single_device_four_channel" | "dual_device_split" | "split"
+                ) || config
                     .cue_device_id
                     .as_ref()
                     .is_some_and(|s| !s.trim().is_empty());
-                rt.cue_level = config.cue_level.clamp(0.0, 2.0);
-                rt.master_level = config.master_level.clamp(0.0, 2.0);
+                rt.cue_split_active = wants_split && rt.cue_available;
+                rt.cue_level = config.cue_level.clamp(0.0, 1.0);
+                rt.master_level = config.master_level.clamp(0.0, 1.0);
                 if !rt.cue_split_active {
                     rt.cue_preview_enabled.insert(DeckId::DeckA, false);
                     rt.cue_preview_enabled.insert(DeckId::DeckB, false);
@@ -1038,6 +1363,13 @@ fn apply_deck_tone(rt: &mut RtState, deck: DeckId) {
     eq.low_gain_db = (bass_db + low_cut_db).clamp(-24.0, 12.0);
     eq.high_gain_db = high_cut_db.clamp(-24.0, 12.0);
     pipeline.eq.set_config(eq);
+}
+
+#[inline]
+fn accumulate_stereo(dest: &mut [f32], src: &[f32]) {
+    for (d, s) in dest.iter_mut().zip(src.iter()) {
+        *d += *s;
+    }
 }
 
 #[inline]

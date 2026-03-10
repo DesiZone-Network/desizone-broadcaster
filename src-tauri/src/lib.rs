@@ -17,15 +17,17 @@ use commands::{
         get_song_play_history, get_top_songs, write_event_log,
     },
     audio_commands::{
-        clear_deck_loop, get_deck_state, get_master_level, get_vu_readings, jog_deck, load_track,
-        next_deck, pause_deck, play_deck, seek_deck, set_channel_gain, set_deck_bass,
-        set_deck_filter, set_deck_loop, set_deck_pitch, set_deck_tempo, set_master_level,
+        apply_audio_output_routing, clear_deck_loop, get_audio_output_status, get_deck_state,
+        get_headphone_level, get_headphone_mix, get_master_level, get_vu_readings, jog_deck,
+        list_audio_output_devices, load_track, next_deck, pause_deck, play_deck, seek_deck,
+        set_channel_gain, set_deck_bass, set_deck_cue_enabled, set_deck_filter, set_deck_loop,
+        set_deck_pitch, set_deck_tempo, set_headphone_level, set_headphone_mix, set_master_level,
         stop_deck,
     },
     beatgrid_commands::{analyze_beatgrid, get_beatgrid},
     controller_commands::{
-        connect_controller, disconnect_controller, get_controller_config,
-        get_controller_status, list_controller_devices, save_controller_config_cmd,
+        connect_controller, disconnect_controller, get_controller_config, get_controller_status,
+        list_controller_devices, save_controller_config_cmd,
     },
     crossfade_commands::{
         get_crossfade_config, get_fade_curve_preview, set_crossfade_config, set_manual_crossfade,
@@ -109,84 +111,81 @@ pub fn run() {
         .build()
         .expect("Failed to build init Tokio runtime")
         .block_on(async {
-                // 1. SQLite (always required)
-                let local = db::local::init_db(&db_path)
+            // 1. SQLite (always required)
+            let local = db::local::init_db(&db_path)
+                .await
+                .expect("Failed to open local SQLite database");
+
+            // Load persisted DJ mode into runtime state at startup.
+            if let Ok(saved_mode) = db::local::get_runtime_dj_mode(&local).await {
+                let mode = crate::scheduler::autodj::DjMode::from_str(&saved_mode);
+                crate::scheduler::autodj::set_dj_mode(mode);
+            }
+            let mut startup_autodj_cfg: Option<crate::scheduler::autodj::AutoTransitionConfig> =
+                None;
+            if let Ok(Some(json)) = db::local::load_autodj_transition_config(&local).await {
+                let cfg =
+                    crate::commands::scheduler_commands::parse_autodj_transition_config_json(&json);
+                crate::scheduler::autodj::set_auto_transition_config(cfg.clone());
+                startup_autodj_cfg = Some(cfg);
+            }
+
+            let mut startup_crossfade_cfg: Option<crate::audio::crossfade::CrossfadeConfig> = None;
+            if let Ok(Some(json)) = db::local::load_crossfade_config(&local).await {
+                let cfg = crate::commands::crossfade_commands::parse_crossfade_config_json(&json);
+                startup_crossfade_cfg = Some(cfg);
+            }
+            let startup_monitor_cfg = db::local::get_monitor_routing_config(&local).await.ok();
+            let startup_controller_cfg =
+                db::local::get_controller_config(&local)
                     .await
-                    .expect("Failed to open local SQLite database");
-
-                // Load persisted DJ mode into runtime state at startup.
-                if let Ok(saved_mode) = db::local::get_runtime_dj_mode(&local).await {
-                    let mode = crate::scheduler::autodj::DjMode::from_str(&saved_mode);
-                    crate::scheduler::autodj::set_dj_mode(mode);
-                }
-                let mut startup_autodj_cfg: Option<crate::scheduler::autodj::AutoTransitionConfig> =
-                    None;
-                if let Ok(Some(json)) = db::local::load_autodj_transition_config(&local).await {
-                    let cfg =
-                        crate::commands::scheduler_commands::parse_autodj_transition_config_json(
-                            &json,
-                        );
-                    crate::scheduler::autodj::set_auto_transition_config(cfg.clone());
-                    startup_autodj_cfg = Some(cfg);
-                }
-
-                let mut startup_crossfade_cfg: Option<crate::audio::crossfade::CrossfadeConfig> =
-                    None;
-                if let Ok(Some(json)) = db::local::load_crossfade_config(&local).await {
-                    let cfg =
-                        crate::commands::crossfade_commands::parse_crossfade_config_json(&json);
-                    startup_crossfade_cfg = Some(cfg);
-                }
-                let startup_monitor_cfg = db::local::get_monitor_routing_config(&local).await.ok();
-                let startup_controller_cfg =
-                    db::local::get_controller_config(&local).await.ok().map(|cfg| {
-                        crate::controller::types::ControllerConfig {
-                            enabled: cfg.enabled,
-                            auto_connect: cfg.auto_connect,
-                            preferred_device_id: cfg.preferred_device_id,
-                            profile: cfg.profile,
-                        }
+                    .ok()
+                    .map(|cfg| crate::controller::types::ControllerConfig {
+                        enabled: cfg.enabled,
+                        auto_connect: cfg.auto_connect,
+                        preferred_device_id: cfg.preferred_device_id,
+                        profile: cfg.profile,
                     });
 
-                // 2. SAM MySQL — attempt auto-connect if configured
-                let sam_opt = match db::local::load_sam_db_config_full(&local).await {
-                    Ok(Some(cfg)) if cfg.config.auto_connect => {
-                        let enc_pw = urlencoding::encode(&cfg.password);
-                        let url = format!(
-                            "mysql://{}:{}@{}:{}/{}",
-                            cfg.config.username,
-                            enc_pw,
-                            cfg.config.host,
-                            cfg.config.port,
-                            cfg.config.database_name,
-                        );
-                        match db::sam::connect(&url).await {
-                            Ok(pool) => {
-                                eprintln!(
-                                    "[startup] SAM DB auto-connected → {}:{}",
-                                    cfg.config.host, cfg.config.database_name
-                                );
-                                Some(pool)
-                            }
-                            Err(e) => {
-                                // Non-fatal — app works without SAM DB
-                                eprintln!("[startup] SAM DB auto-connect failed (continuing): {e}");
-                                None
-                            }
+            // 2. SAM MySQL — attempt auto-connect if configured
+            let sam_opt = match db::local::load_sam_db_config_full(&local).await {
+                Ok(Some(cfg)) if cfg.config.auto_connect => {
+                    let enc_pw = urlencoding::encode(&cfg.password);
+                    let url = format!(
+                        "mysql://{}:{}@{}:{}/{}",
+                        cfg.config.username,
+                        enc_pw,
+                        cfg.config.host,
+                        cfg.config.port,
+                        cfg.config.database_name,
+                    );
+                    match db::sam::connect(&url).await {
+                        Ok(pool) => {
+                            eprintln!(
+                                "[startup] SAM DB auto-connected → {}:{}",
+                                cfg.config.host, cfg.config.database_name
+                            );
+                            Some(pool)
+                        }
+                        Err(e) => {
+                            // Non-fatal — app works without SAM DB
+                            eprintln!("[startup] SAM DB auto-connect failed (continuing): {e}");
+                            None
                         }
                     }
-                    _ => None,
-                };
+                }
+                _ => None,
+            };
 
-                (
-                    local,
-                    sam_opt,
-                    startup_crossfade_cfg,
-                    startup_autodj_cfg,
-                    startup_monitor_cfg,
-                    startup_controller_cfg,
-                )
-            });
+            (
+                local,
+                sam_opt,
+                startup_crossfade_cfg,
+                startup_autodj_cfg,
+                startup_monitor_cfg,
+                startup_controller_cfg,
+            )
+        });
 
     // ── AppState assembly ────────────────────────────────────────────────────
     let mut app_state = AppState::new(engine).with_local_db(local_pool);
@@ -197,11 +196,23 @@ pub fn run() {
         crate::scheduler::autodj::set_auto_transition_config(cfg);
     }
     if let Some(cfg) = startup_monitor_cfg {
-        app_state
-            .engine
-            .lock()
-            .unwrap()
-            .set_monitor_routing_config(cfg);
+        let mode = match cfg.cue_mix_mode.as_str() {
+            "single_device_four_channel" => {
+                crate::audio::device_manager::AudioOutputMode::SingleDeviceFourChannel
+            }
+            "dual_device_split" => crate::audio::device_manager::AudioOutputMode::DualDeviceSplit,
+            _ => crate::audio::device_manager::AudioOutputMode::SingleDeviceStereo,
+        };
+        let routing = crate::audio::device_manager::AudioOutputRoutingConfig {
+            mode,
+            master_device_id: cfg.master_device_id.clone(),
+            cue_device_id: cfg.cue_device_id.clone(),
+            starlight_preferred: true,
+            auto_fallback: cfg.auto_fallback,
+        };
+        let mut engine = app_state.engine.lock().unwrap();
+        engine.set_monitor_routing_config(cfg);
+        let _ = engine.apply_audio_output_routing(routing);
     }
     if let Some(cfg) = startup_controller_cfg {
         app_state.controller_service.set_config(cfg, None);
@@ -232,11 +243,14 @@ pub fn run() {
                     .start_background(app.handle().clone());
                 let cfg = state.controller_service.get_config();
                 if cfg.enabled && cfg.auto_connect {
-                    let _ = state.controller_service.connect(None, &app.handle().clone());
+                    let _ = state
+                        .controller_service
+                        .connect(None, &app.handle().clone());
                 } else {
-                    let _ = app
-                        .handle()
-                        .emit("controller_status_changed", state.controller_service.get_status());
+                    let _ = app.handle().emit(
+                        "controller_status_changed",
+                        state.controller_service.get_status(),
+                    );
                 }
             }
 
@@ -253,14 +267,24 @@ pub fn run() {
                 let mut interval = tokio::time::interval(Duration::from_millis(80));
                 let mut last_manual_crossfade_pos: Option<f32> = None;
                 let mut last_master_level: Option<f32> = None;
+                let mut last_audio_status: Option<crate::audio::device_manager::AudioOutputStatus> =
+                    None;
 
                 loop {
                     interval.tick().await;
 
                     // Collect data while holding the engine lock briefly,
                     // then release it before emitting (avoid holding across await).
-                    let (deck_events, vu_events, crossfade_event, manual_crossfade_pos, master_level) = {
-                        let engine = state.engine.lock().unwrap();
+                    let (
+                        deck_events,
+                        vu_events,
+                        crossfade_event,
+                        manual_crossfade_pos,
+                        master_level,
+                        audio_status,
+                    ) = {
+                        let mut engine = state.engine.lock().unwrap();
+                        let _ = engine.maybe_auto_fallback_output();
                         let deck_events: Vec<_> = [
                             DeckId::DeckA,
                             DeckId::DeckB,
@@ -276,12 +300,14 @@ pub fn run() {
                         let crossfade_event = engine.get_crossfade_progress_event();
                         let manual_crossfade_pos = engine.get_manual_crossfade_pos();
                         let master_level = engine.get_master_level();
+                        let audio_status = engine.get_audio_output_status();
                         (
                             deck_events,
                             vu_events,
                             crossfade_event,
                             manual_crossfade_pos,
                             master_level,
+                            audio_status,
                         )
                     };
 
@@ -313,6 +339,19 @@ pub fn run() {
                             "master_volume_changed",
                             serde_json::json!({ "level": master_level }),
                         );
+                    }
+                    let should_emit_audio_status = last_audio_status
+                        .as_ref()
+                        .map(|prev| prev != &audio_status)
+                        .unwrap_or(true);
+                    if should_emit_audio_status {
+                        last_audio_status = Some(audio_status.clone());
+                        let _ =
+                            app_handle.emit("audio_output_status_changed", audio_status.clone());
+                        if let Some(msg) = audio_status.last_error {
+                            let _ = app_handle
+                                .emit("audio_output_error", serde_json::json!({ "message": msg }));
+                        }
                     }
                 }
             });
@@ -1027,6 +1066,14 @@ pub fn run() {
             clear_deck_loop,
             get_deck_state,
             get_vu_readings,
+            set_headphone_mix,
+            set_headphone_level,
+            get_headphone_mix,
+            get_headphone_level,
+            list_audio_output_devices,
+            get_audio_output_status,
+            apply_audio_output_routing,
+            set_deck_cue_enabled,
             // Phase 1 — Crossfade
             get_crossfade_config,
             set_crossfade_config,

@@ -458,7 +458,7 @@ impl Deck {
         }
     }
 
-    /// Fill `output` with interleaved stereo f32 samples, scaled by `self.gain`.
+    /// Fill `output` with interleaved stereo f32 samples, scaled by channel and crossfader gains.
     ///
     /// `device_sr` is the CPAL output device's sample rate. When it differs from
     /// the track's native sample rate (`self.sample_rate`), linear interpolation
@@ -468,6 +468,20 @@ impl Deck {
     ///
     /// Called on the real-time audio thread — **no allocations, no locks**.
     pub fn fill_buffer(&mut self, output: &mut [f32], device_sr: u32) {
+        self.fill_buffer_with_tap(output, device_sr, None);
+    }
+
+    /// Same as `fill_buffer`, with optional pre-fader tap output.
+    /// Tap receives signal after start/swap ramps but before channel/crossfader gains.
+    pub fn fill_buffer_with_tap(
+        &mut self,
+        output: &mut [f32],
+        device_sr: u32,
+        mut tap_output: Option<&mut [f32]>,
+    ) {
+        if let Some(tap) = tap_output.as_deref_mut() {
+            tap.fill(0.0);
+        }
         if self.paused || !matches!(self.state, DeckState::Playing | DeckState::Crossfading) {
             output.fill(0.0);
             self.rms_db_pre_fader = -96.0;
@@ -535,9 +549,15 @@ impl Deck {
                 }
                 let start_gain = self.next_play_ramp_gain();
                 let swap_gain = self.next_swap_out_gain();
-                let gain = self.channel_gain * self.xfade_gain * start_gain * swap_gain;
-                output[out_i] = l * gain;
-                output[out_i + 1] = r * gain;
+                let tap_gain = start_gain * swap_gain;
+                let tap_l = l * tap_gain;
+                let tap_r = r * tap_gain;
+                output[out_i] = tap_l * self.channel_gain * self.xfade_gain;
+                output[out_i + 1] = tap_r * self.channel_gain * self.xfade_gain;
+                if let Some(tap) = tap_output.as_deref_mut() {
+                    tap[out_i] = tap_l;
+                    tap[out_i + 1] = tap_r;
+                }
                 let l64 = l as f64;
                 let r64 = r as f64;
                 rms_sum_sq += l64 * l64 + r64 * r64;
@@ -605,9 +625,16 @@ impl Deck {
                 rms_samples += 2;
                 let start_gain = self.next_play_ramp_gain();
                 let swap_gain = self.next_swap_out_gain();
-                let gain = self.channel_gain * self.xfade_gain * start_gain * swap_gain;
-                output[out_i * 2] = out_l * gain;
-                output[out_i * 2 + 1] = out_r * gain;
+                let tap_gain = start_gain * swap_gain;
+                let tap_l = out_l * tap_gain;
+                let tap_r = out_r * tap_gain;
+                output[out_i * 2] = tap_l * self.channel_gain * self.xfade_gain;
+                output[out_i * 2 + 1] = tap_r * self.channel_gain * self.xfade_gain;
+                if let Some(tap) = tap_output.as_deref_mut() {
+                    let i = out_i * 2;
+                    tap[i] = tap_l;
+                    tap[i + 1] = tap_r;
+                }
 
                 // Advance fractional phase
                 self.resample_phase += ratio;

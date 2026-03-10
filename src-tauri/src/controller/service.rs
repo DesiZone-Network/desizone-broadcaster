@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 use super::{
     decode::{decode_message, DecodeState},
     executor::execute_action,
-    starlight_profile::DEVICE_NAME_HINT,
+    starlight_profile::{DEVICE_NAME_HINT, MASTER_VOLUME_CC, XFADE_CC, XFADE_STATUS},
     types::{
         now_ts_ms, ControllerAction, ControllerConfig, ControllerDevice, ControllerErrorEvent,
         ControllerStatus,
@@ -25,6 +25,9 @@ const ACTION_QUEUE_SIZE: usize = 512;
 const ANALOG_MIN_INTERVAL_MS: u64 = 25;
 const ANALOG_MIN_DELTA: f32 = 0.005;
 const ANALOG_HEARTBEAT_MS: u64 = 250;
+const XFADE_RELATIVE_PATTERN_MIN_MAGNITUDE: f32 = 0.75;
+const XFADE_RELATIVE_PATTERN_HITS: u8 = 5;
+const XFADE_RELATIVE_DEADZONE: f32 = 0.02;
 const JOG_FLUSH_INTERVAL_MS: u64 = 80;
 const JOG_FLUSH_STEP_TRIGGER: i16 = 4;
 const JOG_MAX_BATCH_STEPS: i16 = 12;
@@ -39,6 +42,33 @@ struct JogState {
     last_sent_at: Instant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CrossfaderMode {
+    Unknown,
+    Absolute,
+    Relative,
+}
+
+struct CrossfaderState {
+    mode: CrossfaderMode,
+    virtual_position: f32,
+    last_raw_position: Option<f32>,
+    last_raw_at: Option<Instant>,
+    relative_hits: u8,
+}
+
+impl Default for CrossfaderState {
+    fn default() -> Self {
+        Self {
+            mode: CrossfaderMode::Unknown,
+            virtual_position: 0.0,
+            last_raw_position: None,
+            last_raw_at: None,
+            relative_hits: 0,
+        }
+    }
+}
+
 struct ControllerInner {
     config: ControllerConfig,
     status: ControllerStatus,
@@ -46,6 +76,8 @@ struct ControllerInner {
     decode_state: DecodeState,
     analog_state: HashMap<String, AnalogState>,
     jog_state: HashMap<crate::audio::crossfade::DeckId, JogState>,
+    crossfader_state: CrossfaderState,
+    learned_headphone_level_cc: Option<u8>,
     worker_started: bool,
     reconnect_started: bool,
 }
@@ -68,6 +100,8 @@ impl ControllerService {
                 decode_state: DecodeState::default(),
                 analog_state: HashMap::new(),
                 jog_state: HashMap::new(),
+                crossfader_state: CrossfaderState::default(),
+                learned_headphone_level_cc: None,
                 worker_started: false,
                 reconnect_started: false,
             })),
@@ -114,18 +148,14 @@ impl ControllerService {
             let service = self.clone();
             thread::Builder::new()
                 .name("controller-reconnect".to_string())
-                .spawn(move || {
-                    loop {
-                        thread::sleep(Duration::from_secs(2));
-                        let should_reconnect = {
-                            let inner = service.inner.lock().unwrap();
-                            inner.config.enabled
-                                && inner.config.auto_connect
-                                && !inner.status.connected
-                        };
-                        if should_reconnect {
-                            let _ = service.connect(None, &app_handle);
-                        }
+                .spawn(move || loop {
+                    thread::sleep(Duration::from_secs(2));
+                    let should_reconnect = {
+                        let inner = service.inner.lock().unwrap();
+                        inner.config.enabled && inner.config.auto_connect && !inner.status.connected
+                    };
+                    if should_reconnect {
+                        let _ = service.connect(None, &app_handle);
                     }
                 })
                 .ok();
@@ -188,8 +218,8 @@ impl ControllerService {
         app_handle: &AppHandle,
     ) -> Result<ControllerStatus, String> {
         let preferred_device_id = self.get_config().preferred_device_id;
-        let mut input =
-            MidiInput::new("desizone-controller-input").map_err(|e| format!("MIDI init failed: {e}"))?;
+        let mut input = MidiInput::new("desizone-controller-input")
+            .map_err(|e| format!("MIDI init failed: {e}"))?;
         input.ignore(Ignore::None);
         let ports = input.ports();
 
@@ -272,6 +302,8 @@ impl ControllerService {
             let _ = inner.connection.take();
             inner.connection = Some(conn);
             inner.jog_state.clear();
+            inner.crossfader_state = CrossfaderState::default();
+            inner.learned_headphone_level_cc = None;
             inner.status.connected = true;
             inner.status.active_device_id = Some(device_id(index, &name));
             inner.status.active_device_name = Some(name.clone());
@@ -290,6 +322,8 @@ impl ControllerService {
             let mut inner = self.inner.lock().unwrap();
             let _ = inner.connection.take();
             inner.jog_state.clear();
+            inner.crossfader_state = CrossfaderState::default();
+            inner.learned_headphone_level_cc = None;
             inner.status.connected = false;
             inner.status.active_device_id = None;
             inner.status.active_device_name = None;
@@ -314,11 +348,29 @@ impl ControllerService {
                             actions.push(jog_action);
                         }
                     }
+                    ControllerAction::SetCrossfader {
+                        position,
+                        normalized,
+                    } => {
+                        if let Some(mapped) = self.normalize_crossfader_action(
+                            &mut inner, position, normalized, app_handle,
+                        ) {
+                            if self.should_dispatch_action(&mut inner, &mapped) {
+                                actions.push(mapped);
+                            }
+                        }
+                    }
                     other => {
                         if self.should_dispatch_action(&mut inner, &other) {
                             actions.push(other);
                         }
                     }
+                }
+            }
+            if let Some(action) = self.maybe_decode_headphone_level(&mut inner, message, app_handle)
+            {
+                if self.should_dispatch_action(&mut inner, &action) {
+                    actions.push(action);
                 }
             }
             self.flush_due_jog_actions(&mut inner, &mut actions);
@@ -340,13 +392,20 @@ impl ControllerService {
                     }
                 }
                 Err(TrySendError::Disconnected(_)) => {
-                    self.emit_error("Controller action queue disconnected".to_string(), app_handle);
+                    self.emit_error(
+                        "Controller action queue disconnected".to_string(),
+                        app_handle,
+                    );
                 }
             }
         }
     }
 
-    fn should_dispatch_action(&self, inner: &mut ControllerInner, action: &ControllerAction) -> bool {
+    fn should_dispatch_action(
+        &self,
+        inner: &mut ControllerInner,
+        action: &ControllerAction,
+    ) -> bool {
         let Some((key, value)) = action.analog_key_and_value() else {
             return true;
         };
@@ -371,6 +430,84 @@ impl ControllerService {
         true
     }
 
+    fn normalize_crossfader_action(
+        &self,
+        inner: &mut ControllerInner,
+        raw_position: f32,
+        raw_normalized: f32,
+        app_handle: &AppHandle,
+    ) -> Option<ControllerAction> {
+        let now = Instant::now();
+        let state = &mut inner.crossfader_state;
+
+        if let (Some(prev), Some(prev_at)) = (state.last_raw_position, state.last_raw_at) {
+            let rapid = now.duration_since(prev_at) <= Duration::from_millis(20);
+            let strong_flip = prev.signum() != raw_position.signum()
+                && prev.abs() >= XFADE_RELATIVE_PATTERN_MIN_MAGNITUDE
+                && raw_position.abs() >= XFADE_RELATIVE_PATTERN_MIN_MAGNITUDE;
+            if rapid && strong_flip {
+                state.relative_hits = state.relative_hits.saturating_add(1);
+            } else if state.relative_hits > 0 {
+                state.relative_hits = state.relative_hits.saturating_sub(1);
+            }
+        }
+        state.last_raw_position = Some(raw_position);
+        state.last_raw_at = Some(now);
+
+        if state.mode == CrossfaderMode::Unknown {
+            if state.relative_hits >= XFADE_RELATIVE_PATTERN_HITS {
+                state.mode = CrossfaderMode::Relative;
+                self.emit_error(
+                    "Detected relative crossfader MIDI mode; applying compatibility translation."
+                        .to_string(),
+                    app_handle,
+                );
+            } else if raw_position.abs() < 0.7 {
+                state.mode = CrossfaderMode::Absolute;
+            }
+        }
+
+        if state.mode == CrossfaderMode::Relative {
+            let delta = if raw_position < -XFADE_RELATIVE_DEADZONE {
+                (0.01 + raw_position.abs() * 0.03).clamp(0.01, 0.04)
+            } else if raw_position > XFADE_RELATIVE_DEADZONE {
+                -(0.01 + raw_position.abs() * 0.03).clamp(0.01, 0.04)
+            } else {
+                0.0
+            };
+            if delta.abs() <= f32::EPSILON {
+                return None;
+            }
+            state.virtual_position = (state.virtual_position + delta).clamp(-1.0, 1.0);
+            let normalized = ((state.virtual_position + 1.0) * 0.5).clamp(0.0, 1.0);
+            return Some(ControllerAction::SetCrossfader {
+                position: state.virtual_position,
+                normalized,
+            });
+        }
+
+        // Absolute mode: apply light smoothing to damp hardware jitter.
+        let alpha = 0.45_f32;
+        state.virtual_position = (state.virtual_position
+            + alpha * (raw_position - state.virtual_position))
+            .clamp(-1.0, 1.0);
+        let normalized = ((state.virtual_position + 1.0) * 0.5).clamp(0.0, 1.0);
+
+        // Keep analog key value close to source in case mode just switched to absolute.
+        if state.mode == CrossfaderMode::Unknown {
+            state.virtual_position = raw_position.clamp(-1.0, 1.0);
+            return Some(ControllerAction::SetCrossfader {
+                position: state.virtual_position,
+                normalized: raw_normalized.clamp(0.0, 1.0),
+            });
+        }
+
+        Some(ControllerAction::SetCrossfader {
+            position: state.virtual_position,
+            normalized,
+        })
+    }
+
     fn accumulate_jog_action(
         &self,
         inner: &mut ControllerInner,
@@ -387,8 +524,8 @@ impl ControllerService {
                 .checked_sub(Duration::from_millis(JOG_FLUSH_INTERVAL_MS))
                 .unwrap_or(now),
         });
-        state.pending_steps =
-            (state.pending_steps + delta_steps as i16).clamp(-JOG_MAX_BATCH_STEPS, JOG_MAX_BATCH_STEPS);
+        state.pending_steps = (state.pending_steps + delta_steps as i16)
+            .clamp(-JOG_MAX_BATCH_STEPS, JOG_MAX_BATCH_STEPS);
 
         let elapsed = now.duration_since(state.last_sent_at);
         if elapsed < Duration::from_millis(JOG_FLUSH_INTERVAL_MS)
@@ -408,11 +545,7 @@ impl ControllerService {
         })
     }
 
-    fn flush_due_jog_actions(
-        &self,
-        inner: &mut ControllerInner,
-        out: &mut Vec<ControllerAction>,
-    ) {
+    fn flush_due_jog_actions(&self, inner: &mut ControllerInner, out: &mut Vec<ControllerAction>) {
         let now = Instant::now();
         let flush_after = Duration::from_millis(JOG_FLUSH_INTERVAL_MS);
         for (deck, state) in inner.jog_state.iter_mut() {
@@ -454,6 +587,46 @@ impl ControllerService {
             timestamp: now_ts_ms(),
         };
         let _ = app_handle.emit("controller_error", payload);
+    }
+
+    fn maybe_decode_headphone_level(
+        &self,
+        inner: &mut ControllerInner,
+        message: &[u8],
+        app_handle: &AppHandle,
+    ) -> Option<ControllerAction> {
+        if message.len() < 3 {
+            return None;
+        }
+        let status = message[0];
+        let cc = message[1];
+        let value = message[2];
+        if status != XFADE_STATUS {
+            return None;
+        }
+        if cc == XFADE_CC || cc == MASTER_VOLUME_CC || cc == 0x7F {
+            return None;
+        }
+
+        match inner.learned_headphone_level_cc {
+            Some(learned) if learned == cc => {}
+            Some(_) => return None,
+            None => {
+                inner.learned_headphone_level_cc = Some(cc);
+                self.emit_error(
+                    format!(
+                        "Learned headphone level MIDI CC 0x{cc:02X}; mapping this control to headphone level."
+                    ),
+                    app_handle,
+                );
+            }
+        }
+
+        let normalized = (value as f32 / 127.0).clamp(0.0, 1.0);
+        Some(ControllerAction::SetHeadphoneLevel {
+            level: normalized,
+            normalized,
+        })
     }
 }
 

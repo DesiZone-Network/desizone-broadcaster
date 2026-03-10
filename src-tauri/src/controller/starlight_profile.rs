@@ -14,6 +14,7 @@ pub const DECK_B_PAD_STATUS: u8 = 0x97;
 pub const PLAY_NOTE: u8 = 0x07;
 pub const CUE_NOTE: u8 = 0x06;
 pub const SYNC_NOTE: u8 = 0x05;
+pub const PFL_NOTE: u8 = 0x0C;
 
 pub const PAD_1_NOTE: u8 = 0x00;
 pub const PAD_4_NOTE: u8 = 0x03;

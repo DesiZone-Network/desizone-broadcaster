@@ -1,24 +1,41 @@
 import { useEffect, useState } from "react";
 import { CheckCircle, Database, Gamepad2, XCircle } from "lucide-react";
 import {
+    applyAudioOutputRouting,
     connectController,
     connectSamDb,
     disconnectController,
     disconnectSamDb,
+    getAudioOutputStatus,
     getControllerConfig,
     getControllerStatus,
+    getDeckState,
+    getHeadphoneLevel,
+    getHeadphoneMix,
+    getMonitorRoutingConfig,
     getSamDbConfig,
     getSamDbStatus,
+    listAudioOutputDevices,
     listControllerDevices,
+    onAudioOutputError,
+    onAudioOutputStatusChanged,
     onControllerError,
     onControllerStatusChanged,
+    onDeckStateChanged,
     saveControllerConfig,
+    setDeckCueEnabled,
+    setHeadphoneLevel as setHeadphoneLevelCmd,
+    setHeadphoneMix as setHeadphoneMixCmd,
     testSamDbConnection,
 } from "../lib/bridge";
 import type {
+    AudioOutputDevice,
+    AudioOutputRoutingConfig,
+    AudioOutputStatus,
     ControllerConfig,
     ControllerDevice,
     ControllerStatus,
+    DeckId,
     SamDbStatus,
 } from "../lib/bridge";
 import {
@@ -56,6 +73,26 @@ const DEFAULT_CONTROLLER_CONFIG: ControllerConfig = {
     profile: "hercules_djcontrol_starlight",
 };
 
+const DEFAULT_AUDIO_ROUTING_CONFIG: AudioOutputRoutingConfig = {
+    mode: "single_device_four_channel",
+    master_device_id: null,
+    cue_device_id: null,
+    starlight_preferred: true,
+    auto_fallback: true,
+};
+
+const parseAudioMode = (mode: string): AudioOutputRoutingConfig["mode"] => {
+    if (mode === "single_device_four_channel") return "single_device_four_channel";
+    if (mode === "dual_device_split") return "dual_device_split";
+    return "single_device_stereo";
+};
+
+const audioModeLabel = (mode: AudioOutputRoutingConfig["mode"]) => {
+    if (mode === "single_device_four_channel") return "Starlight 4ch";
+    if (mode === "dual_device_split") return "Dual Device";
+    return "Fallback Stereo";
+};
+
 export function SettingsPage() {
     const [activeTab, setActiveTab] = useState<"sam_db" | "audio" | "controllers">("sam_db");
     const [form, setForm] = useState<DbForm>(DEFAULT_FORM);
@@ -73,6 +110,28 @@ export function SettingsPage() {
     const [controllerDevices, setControllerDevices] = useState<ControllerDevice[]>([]);
     const [controllerBusy, setControllerBusy] = useState(false);
     const [controllerMessage, setControllerMessage] = useState<string | null>(null);
+    const [audioDevices, setAudioDevices] = useState<AudioOutputDevice[]>([]);
+    const [audioRoutingConfig, setAudioRoutingConfig] = useState<AudioOutputRoutingConfig>(
+        DEFAULT_AUDIO_ROUTING_CONFIG
+    );
+    const [audioStatus, setAudioStatus] = useState<AudioOutputStatus | null>(null);
+    const [audioBusy, setAudioBusy] = useState(false);
+    const [audioMessage, setAudioMessage] = useState<string | null>(null);
+    const [headphoneMix, setHeadphoneMixState] = useState(-1);
+    const [headphoneLevel, setHeadphoneLevelState] = useState(1);
+    const [deckCueState, setDeckCueState] = useState<Record<Extract<DeckId, "deck_a" | "deck_b">, boolean>>({
+        deck_a: false,
+        deck_b: false,
+    });
+
+    const refreshAudioRouting = async () => {
+        const [devices, st] = await Promise.all([
+            listAudioOutputDevices(),
+            getAudioOutputStatus(),
+        ]);
+        setAudioDevices(devices);
+        setAudioStatus(st);
+    };
 
     useEffect(() => {
         getSamDbConfig()
@@ -92,11 +151,37 @@ export function SettingsPage() {
         setAlbumArtBaseUrlState(getAlbumArtBaseUrl());
         refreshStatus();
 
-        Promise.all([getControllerConfig(), getControllerStatus(), listControllerDevices()])
-            .then(([cfg, st, devices]) => {
+        Promise.all([
+            getControllerConfig(),
+            getControllerStatus(),
+            listControllerDevices(),
+            getMonitorRoutingConfig(),
+            listAudioOutputDevices(),
+            getAudioOutputStatus(),
+            getHeadphoneMix(),
+            getHeadphoneLevel(),
+            getDeckState("deck_a"),
+            getDeckState("deck_b"),
+        ])
+            .then(([cfg, st, devices, monitorCfg, audioDevices, audioSt, hpMix, hpLevel, deckA, deckB]) => {
                 setControllerConfigState(cfg);
                 setControllerStatus(st);
                 setControllerDevices(devices);
+                setAudioDevices(audioDevices);
+                setAudioStatus(audioSt);
+                setHeadphoneMixState(hpMix);
+                setHeadphoneLevelState(hpLevel);
+                setAudioRoutingConfig({
+                    mode: parseAudioMode(monitorCfg.cue_mix_mode),
+                    master_device_id: monitorCfg.master_device_id,
+                    cue_device_id: monitorCfg.cue_device_id,
+                    starlight_preferred: true,
+                    auto_fallback: monitorCfg.auto_fallback ?? true,
+                });
+                setDeckCueState({
+                    deck_a: !!deckA?.cue_preview_enabled,
+                    deck_b: !!deckB?.cue_preview_enabled,
+                });
             })
             .catch(() => {});
 
@@ -105,9 +190,33 @@ export function SettingsPage() {
             setControllerMessage(st.last_error ?? null);
         });
         const unsubError = onControllerError((ev) => setControllerMessage(ev.message));
+        const unsubAudioStatus = onAudioOutputStatusChanged((st) => {
+            setAudioStatus(st);
+            setAudioRoutingConfig((prev) => ({
+                ...prev,
+                mode: st.active_mode,
+                master_device_id: st.master_device_id ?? prev.master_device_id,
+                cue_device_id: st.cue_device_id ?? prev.cue_device_id,
+            }));
+            if (st.last_error) {
+                setAudioMessage(st.last_error);
+            }
+        });
+        const unsubAudioError = onAudioOutputError((ev) => setAudioMessage(ev.message));
+        const unsubDeckState = onDeckStateChanged((ev) => {
+            if (ev.deck === "deck_a" || ev.deck === "deck_b") {
+                setDeckCueState((prev) => ({
+                    ...prev,
+                    [ev.deck]: !!ev.cue_preview_enabled,
+                }));
+            }
+        });
         return () => {
             unsubStatus.then((fn) => fn());
             unsubError.then((fn) => fn());
+            unsubAudioStatus.then((fn) => fn());
+            unsubAudioError.then((fn) => fn());
+            unsubDeckState.then((fn) => fn());
         };
     }, []);
 
@@ -122,6 +231,24 @@ export function SettingsPage() {
         ]);
         setControllerDevices(devices);
         setControllerStatus(st);
+    };
+
+    const applyAudioRouting = async () => {
+        setAudioBusy(true);
+        setAudioMessage(null);
+        try {
+            const status = await applyAudioOutputRouting(audioRoutingConfig);
+            setAudioStatus(status);
+            setAudioMessage(status.last_error ?? null);
+            // Avoid immediate device re-enumeration after stream rebuild; CoreAudio can lag briefly.
+            window.setTimeout(() => {
+                refreshAudioRouting().catch(() => {});
+            }, 350);
+        } catch (e: any) {
+            setAudioMessage(String(e));
+        } finally {
+            setAudioBusy(false);
+        }
     };
 
     const saveController = async (next: ControllerConfig) => {
@@ -413,6 +540,218 @@ export function SettingsPage() {
 
             {activeTab === "audio" && (
                 <div style={{ maxWidth: 700 }}>
+                    <div
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            padding: "8px 12px",
+                            borderRadius: "var(--r-md)",
+                            background: audioStatus?.cue_available ? "rgba(16,185,129,.12)" : "rgba(148,163,184,.08)",
+                            border: `1px solid ${audioStatus?.cue_available ? "rgba(16,185,129,.3)" : "var(--border-default)"}`,
+                            marginBottom: 16,
+                            fontSize: 12,
+                        }}
+                    >
+                        {audioStatus?.cue_available ? (
+                            <CheckCircle size={14} style={{ color: "var(--green)", flexShrink: 0 }} />
+                        ) : (
+                            <XCircle size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+                        )}
+                        <span style={{ color: audioStatus?.cue_available ? "var(--green)" : "var(--text-muted)" }}>
+                            {audioStatus?.master_device_name
+                                ? `${audioStatus.master_device_name} • ${audioModeLabel(audioStatus.active_mode)}`
+                                : "No active output device"}
+                            {audioStatus?.fallback_active ? " • Fallback Active" : ""}
+                        </span>
+                        <button
+                            className="btn btn-ghost"
+                            style={{ marginLeft: "auto", fontSize: 9, padding: "2px 7px" }}
+                            onClick={() => refreshAudioRouting().catch(() => {})}
+                        >
+                            Refresh
+                        </button>
+                    </div>
+
+                    <div className="section-label" style={{ marginBottom: 10 }}>
+                        Output Routing
+                    </div>
+                    <div className="form-row">
+                        <span className="form-label">Output Device</span>
+                        <select
+                            className="input"
+                            value={audioRoutingConfig.master_device_id ?? ""}
+                            disabled={audioBusy}
+                            onChange={(e) =>
+                                setAudioRoutingConfig((prev) => ({
+                                    ...prev,
+                                    master_device_id: e.target.value || null,
+                                }))
+                            }
+                        >
+                            <option value="">Default / Auto-select</option>
+                            {audioDevices.map((device) => (
+                                <option key={device.id} value={device.id}>
+                                    {device.name}
+                                    {device.is_starlight ? " (Starlight)" : ""}
+                                    {device.is_default ? " [Default]" : ""}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="form-row">
+                        <span className="form-label">Routing Mode</span>
+                        <select
+                            className="input"
+                            value={audioRoutingConfig.mode}
+                            disabled={audioBusy}
+                            onChange={(e) =>
+                                setAudioRoutingConfig((prev) => ({
+                                    ...prev,
+                                    mode: parseAudioMode(e.target.value),
+                                }))
+                            }
+                        >
+                            <option value="single_device_four_channel">Starlight 4-channel</option>
+                            <option value="single_device_stereo">Single Device Stereo</option>
+                            <option value="dual_device_split">Dual Device (reserved)</option>
+                        </select>
+                    </div>
+                    <div
+                        className="form-row"
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
+                    >
+                        <span className="form-label">Auto-fallback on device loss</span>
+                        <button
+                            className="btn btn-ghost"
+                            style={{
+                                fontSize: 10,
+                                background: audioRoutingConfig.auto_fallback
+                                    ? "rgba(16,185,129,.15)"
+                                    : "var(--bg-elevated)",
+                                borderColor: audioRoutingConfig.auto_fallback
+                                    ? "rgba(16,185,129,.4)"
+                                    : "var(--border-default)",
+                                color: audioRoutingConfig.auto_fallback ? "var(--green)" : "var(--text-muted)",
+                                padding: "3px 10px",
+                            }}
+                            disabled={audioBusy}
+                            onClick={() =>
+                                setAudioRoutingConfig((prev) => ({
+                                    ...prev,
+                                    auto_fallback: !prev.auto_fallback,
+                                }))
+                            }
+                        >
+                            {audioRoutingConfig.auto_fallback ? "ON" : "OFF"}
+                        </button>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                        <button
+                            className="btn btn-primary"
+                            style={{ fontSize: 11 }}
+                            disabled={audioBusy}
+                            onClick={() => applyAudioRouting().catch(() => {})}
+                        >
+                            {audioBusy ? "Applying…" : "Apply Routing"}
+                        </button>
+                    </div>
+
+                    <div className="section-label" style={{ marginTop: 20, marginBottom: 10 }}>
+                        Headphone Cue
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                        <button
+                            className="btn btn-ghost"
+                            style={{
+                                fontSize: 11,
+                                color: deckCueState.deck_a ? "var(--green)" : "var(--text-muted)",
+                                borderColor: deckCueState.deck_a ? "rgba(16,185,129,.4)" : "var(--border-default)",
+                            }}
+                            onClick={async () => {
+                                const next = !deckCueState.deck_a;
+                                setDeckCueState((prev) => ({ ...prev, deck_a: next }));
+                                try {
+                                    await setDeckCueEnabled("deck_a", next);
+                                } catch (e: any) {
+                                    setAudioMessage(String(e));
+                                }
+                            }}
+                        >
+                            Deck A Cue {deckCueState.deck_a ? "On" : "Off"}
+                        </button>
+                        <button
+                            className="btn btn-ghost"
+                            style={{
+                                fontSize: 11,
+                                color: deckCueState.deck_b ? "var(--green)" : "var(--text-muted)",
+                                borderColor: deckCueState.deck_b ? "rgba(16,185,129,.4)" : "var(--border-default)",
+                            }}
+                            onClick={async () => {
+                                const next = !deckCueState.deck_b;
+                                setDeckCueState((prev) => ({ ...prev, deck_b: next }));
+                                try {
+                                    await setDeckCueEnabled("deck_b", next);
+                                } catch (e: any) {
+                                    setAudioMessage(String(e));
+                                }
+                            }}
+                        >
+                            Deck B Cue {deckCueState.deck_b ? "On" : "Off"}
+                        </button>
+                    </div>
+                    <div className="form-row">
+                        <span className="form-label">
+                            Cue/Mix ({headphoneMix.toFixed(2)})
+                        </span>
+                        <input
+                            type="range"
+                            min={-1}
+                            max={1}
+                            step={0.01}
+                            className="input"
+                            value={headphoneMix}
+                            onChange={(e) => {
+                                const next = Number(e.target.value);
+                                setHeadphoneMixState(next);
+                                setHeadphoneMixCmd(next).catch((err) => setAudioMessage(String(err)));
+                            }}
+                        />
+                    </div>
+                    <div className="form-row">
+                        <span className="form-label">
+                            Headphone Level ({headphoneLevel.toFixed(2)})
+                        </span>
+                        <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            className="input"
+                            value={headphoneLevel}
+                            onChange={(e) => {
+                                const next = Number(e.target.value);
+                                setHeadphoneLevelState(next);
+                                setHeadphoneLevelCmd(next).catch((err) => setAudioMessage(String(err)));
+                            }}
+                        />
+                    </div>
+                    {audioMessage && (
+                        <div
+                            style={{
+                                marginTop: 12,
+                                padding: "7px 12px",
+                                borderRadius: "var(--r-md)",
+                                background: "rgba(239,68,68,.10)",
+                                border: "1px solid rgba(239,68,68,.25)",
+                                fontSize: 11,
+                                color: "var(--red)",
+                            }}
+                        >
+                            {audioMessage}
+                        </div>
+                    )}
+
                     <div className="section-label" style={{ marginBottom: 10 }}>
                         Album Art
                     </div>
@@ -648,7 +987,7 @@ export function SettingsPage() {
                             padding: "10px 12px",
                         }}
                     >
-                        MVP limitations: no LED feedback and no split cue/master hardware audio routing yet.
+                        MVP limitations: no LED feedback yet. Configure Starlight headphone/master routing in the Audio tab.
                     </div>
                 </div>
             )}
