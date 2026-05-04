@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePool, Row};
 
+use crate::stream::encoder_manager::EncoderConfig;
+
 /// Initialise (or migrate) the local SQLite database at `db_path`.
 /// Creates all tables if they don't exist.
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, sqlx::Error> {
@@ -256,6 +258,13 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             play_count      INTEGER DEFAULT 0,
             unique_songs    INTEGER DEFAULT 0,
             PRIMARY KEY (date, hour)
+        );
+
+        -- Phase 4: Encoder configurations
+        CREATE TABLE IF NOT EXISTS encoder_configs (
+            id           INTEGER PRIMARY KEY,
+            config_json  TEXT    NOT NULL,
+            updated_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
 
         -- Phase 7: Event log
@@ -1246,6 +1255,60 @@ pub async fn save_crossfade_config(pool: &SqlitePool, json: &str) -> Result<(), 
     .bind(json)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+// ── Phase 4: Encoder configs ──────────────────────────────────────────────────
+
+pub async fn load_encoder_configs(pool: &SqlitePool) -> Result<Vec<EncoderConfig>, String> {
+    let rows = sqlx::query("SELECT config_json FROM encoder_configs ORDER BY id ASC")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("load_encoder_configs query failed: {e}"))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let json: String = row
+            .try_get("config_json")
+            .map_err(|e| format!("load_encoder_configs decode failed: {e}"))?;
+        match serde_json::from_str::<EncoderConfig>(&json) {
+            Ok(cfg) => out.push(cfg),
+            Err(e) => {
+                log::warn!("Skipping invalid encoder config row: {e}");
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub async fn save_encoder_config(pool: &SqlitePool, config: &EncoderConfig) -> Result<(), String> {
+    let json =
+        serde_json::to_string(config).map_err(|e| format!("save_encoder_config serialize: {e}"))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO encoder_configs (id, config_json, updated_at)
+        VALUES (?, ?, strftime('%s','now'))
+        ON CONFLICT(id) DO UPDATE SET
+            config_json = excluded.config_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(config.id)
+    .bind(json)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("save_encoder_config query failed: {e}"))?;
+
+    Ok(())
+}
+
+pub async fn delete_encoder_config(pool: &SqlitePool, id: i64) -> Result<(), String> {
+    sqlx::query("DELETE FROM encoder_configs WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("delete_encoder_config query failed: {e}"))?;
     Ok(())
 }
 

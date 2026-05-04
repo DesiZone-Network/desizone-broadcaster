@@ -18,7 +18,7 @@ import {
 import type { SamSong } from "../../lib/bridge";
 import { writeEventLog } from "../../lib/bridge7";
 import { VUMeter } from "../deck/VUMeter";
-import { parseSongDragPayload } from "../../lib/songDrag";
+import { parseSongDragFromDataTransfer } from "../../lib/songDrag";
 
 interface SourceChannel {
     id: SourceDeckId;
@@ -183,14 +183,28 @@ function SourceStrip({
             onDrop={async (e) => {
                 e.preventDefault();
                 setIsDragOver(false);
-                const raw = e.dataTransfer.getData("text/plain");
-                if (!raw) return;
-                const song = parseSongDragPayload(raw) as SamSong | null;
-                if (!song) return;
+                const { song, error } = parseSongDragFromDataTransfer(e.dataTransfer);
+                if (error) {
+                    setLoadError(error);
+                    setTimeout(() => setLoadError(null), 6000);
+                    writeEventLog({
+                        level: "warn",
+                        category: "system",
+                        event: "invalid_song_drop_payload",
+                        message: `Ignored invalid drop payload on ${ch.id}: ${error}`,
+                        deck: ch.id,
+                    }).catch(() => {});
+                    return;
+                }
+                const droppedSong = song as SamSong | null;
+                if (!droppedSong) {
+                    setLoadError("Dropped item is missing song metadata.");
+                    setTimeout(() => setLoadError(null), 6000);
+                    return;
+                }
                 try {
-                    await loadTrack(ch.id, song.filename, song.id);
+                    await loadTrack(ch.id, droppedSong.filename, droppedSong.id);
                     setLoadError(null);
-                    setLoadedSong({ artist: song.artist || "", title: song.title || filenameFromPath(song.filename) });
                 } catch (err) {
                     const msg = err instanceof Error ? err.message : String(err);
                     setLoadError(msg);
@@ -199,9 +213,9 @@ function SourceStrip({
                         level: "error",
                         category: "audio",
                         event: "track_load_failed",
-                        message: `Failed to load "${song.artist} – ${song.title}" on ${ch.id}: ${msg}`,
+                        message: `Failed to load "${droppedSong.artist} – ${droppedSong.title}" on ${ch.id}: ${msg}`,
                         deck: ch.id,
-                        songId: song.id,
+                        songId: droppedSong.id,
                     }).catch(() => {});
                 }
             }}

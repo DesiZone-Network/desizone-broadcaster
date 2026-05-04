@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Wifi, WifiOff, Radio } from "lucide-react";
+import { Wifi, WifiOff, Radio, Volume2, VolumeX } from "lucide-react";
 import {
+  getLocalMonitorMuted,
   getMasterLevel,
   getDjMode,
-  getEncoderRuntime,
   onMasterVolumeChanged,
   onDjModeChanged,
-  onEncoderStatusChanged,
-  onListenerCountUpdated,
   onVuMeter,
+  setLocalMonitorMuted,
   setMasterLevel,
   VuEvent,
   type DjMode,
@@ -16,8 +15,9 @@ import {
 
 interface Props {
   stationName?: string;
-  isOnAir: boolean;
+  onAir: boolean;
   streamConnected: boolean;
+  totalListeners: number;
 }
 
 function MasterVU({ vuData }: { vuData: VuEvent | null }) {
@@ -90,15 +90,20 @@ function Clock() {
   );
 }
 
-export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamConnected }: Props) {
+export function TopBar({
+  stationName = "DesiZone Broadcaster",
+  onAir,
+  streamConnected,
+  totalListeners,
+}: Props) {
   const [masterVu, setMasterVu] = useState<VuEvent | null>(null);
   const [masterLevel, setMasterLevelState] = useState(1);
+  const [localMonitorMuted, setLocalMonitorMutedState] = useState(false);
   const [djMode, setDjMode] = useState<DjMode>("manual");
-  const [listenerTotal, setListenerTotal] = useState<number | null>(null);
 
   useEffect(() => {
     const unsub = onVuMeter((e) => {
-      if (e.channel === "deck_a" || e.channel === "deck_b") {
+      if (e.channel === "master") {
         setMasterVu(e);
       }
     });
@@ -107,6 +112,9 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
 
   useEffect(() => {
     getMasterLevel().then((level) => setMasterLevelState(level)).catch(() => {});
+    getLocalMonitorMuted()
+      .then((muted) => setLocalMonitorMutedState(muted))
+      .catch(() => {});
     const off = onMasterVolumeChanged((event) => {
       setMasterLevelState(event.level);
     });
@@ -127,33 +135,6 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
     };
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    const refreshListeners = () => {
-      getEncoderRuntime()
-        .then((runtime) => {
-          if (disposed) return;
-          const total = runtime.reduce((sum, item) => sum + (item.listeners ?? 0), 0);
-          setListenerTotal(total);
-        })
-        .catch(() => {
-          if (!disposed) setListenerTotal(null);
-        });
-    };
-
-    refreshListeners();
-    const countTimer = setInterval(refreshListeners, 15000);
-    const offStatus = onEncoderStatusChanged(() => refreshListeners());
-    const offCount = onListenerCountUpdated(() => refreshListeners());
-
-    return () => {
-      disposed = true;
-      clearInterval(countTimer);
-      offStatus.then((fn) => fn());
-      offCount.then((fn) => fn());
-    };
-  }, []);
-
   const modeLabel = djMode === "autodj" ? "AUTODJ" : djMode === "assisted" ? "ASSISTED" : "MANUAL";
   const modeStyle =
     djMode === "autodj"
@@ -166,6 +147,14 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
     const clamped = Math.max(0, Math.min(1, next));
     setMasterLevelState(clamped);
     setMasterLevel(clamped).catch(() => {});
+  };
+
+  const toggleLocalMonitorMute = () => {
+    const next = !localMonitorMuted;
+    setLocalMonitorMutedState(next);
+    setLocalMonitorMuted(next).catch(() => {
+      setLocalMonitorMutedState(!next);
+    });
   };
 
   return (
@@ -200,13 +189,13 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
 
       {/* Center: Status badges */}
       <div className="flex items-center gap-3">
-        {isOnAir && (
+        {onAir && (
           <div className="badge badge-on-air on-air-glow">
             <div className="pulse-dot pulse-dot-red" />
             ON AIR
           </div>
         )}
-        {!isOnAir && (
+        {!onAir && (
           <div className="badge" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--text-muted)" }}>
             OFF AIR
           </div>
@@ -226,7 +215,7 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
             color: "var(--cyan)",
           }}
         >
-          LISTENERS {listenerTotal ?? 0}
+          LISTENERS {totalListeners}
         </div>
 
         <div className="badge" style={modeStyle}>
@@ -237,6 +226,29 @@ export function TopBar({ stationName = "DesiZone Broadcaster", isOnAir, streamCo
       {/* Right: VU + Clock */}
       <div className="flex items-center gap-5">
         <div className="flex flex-col items-end" style={{ minWidth: 120 }}>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={toggleLocalMonitorMute}
+            title={localMonitorMuted ? "Unmute local monitor output" : "Mute local monitor output"}
+            style={{
+              height: 24,
+              padding: "0 8px",
+              marginBottom: 3,
+              borderRadius: 8,
+              border: localMonitorMuted ? "1px solid rgba(220,38,38,.45)" : "1px solid var(--border-strong)",
+              background: localMonitorMuted ? "rgba(220,38,38,.14)" : "var(--bg-elevated)",
+              color: localMonitorMuted ? "var(--red)" : "var(--text-muted)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+            }}
+          >
+            {localMonitorMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
+            <span className="mono" style={{ fontSize: 9, letterSpacing: "0.08em" }}>
+              MONITOR {localMonitorMuted ? "MUTED" : "LIVE"}
+            </span>
+          </button>
           <span className="mono text-muted" style={{ fontSize: 9, letterSpacing: "0.08em" }}>MASTER</span>
           <input
             type="range"

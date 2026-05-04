@@ -18,11 +18,11 @@ use commands::{
     },
     audio_commands::{
         apply_audio_output_routing, clear_deck_loop, get_audio_output_status, get_deck_state,
-        get_headphone_level, get_headphone_mix, get_master_level, get_vu_readings, jog_deck,
-        list_audio_output_devices, load_track, next_deck, pause_deck, play_deck, seek_deck,
-        set_channel_gain, set_deck_bass, set_deck_cue_enabled, set_deck_filter, set_deck_loop,
-        set_deck_pitch, set_deck_tempo, set_headphone_level, set_headphone_mix, set_master_level,
-        stop_deck,
+        get_headphone_level, get_headphone_mix, get_local_monitor_muted, get_master_level,
+        get_vu_readings, jog_deck, list_audio_output_devices, load_track, next_deck, pause_deck,
+        play_deck, seek_deck, set_channel_gain, set_deck_bass, set_deck_cue_enabled,
+        set_deck_filter, set_deck_loop, set_deck_pitch, set_deck_tempo, set_headphone_level,
+        set_headphone_mix, set_local_monitor_muted, set_master_level, stop_deck,
     },
     beatgrid_commands::{analyze_beatgrid, get_beatgrid},
     controller_commands::{
@@ -87,6 +87,7 @@ use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_logging();
     let engine = audio::engine::AudioEngine::new().expect("Failed to initialise audio engine");
 
     // ── Database initialisation ──────────────────────────────────────────────
@@ -102,6 +103,7 @@ pub fn run() {
     let (
         local_pool,
         sam_pool_opt,
+        startup_encoders,
         startup_crossfade_cfg,
         startup_autodj_cfg,
         startup_monitor_cfg,
@@ -146,6 +148,17 @@ pub fn run() {
                         preferred_device_id: cfg.preferred_device_id,
                         profile: cfg.profile,
                     });
+            let startup_encoders = match db::local::load_encoder_configs(&local).await {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[startup] failed to load encoder configs (continuing): {e}");
+                    Vec::new()
+                }
+            };
+            eprintln!(
+                "[startup] loaded {} encoder config(s)",
+                startup_encoders.len()
+            );
 
             // 2. SAM MySQL — attempt auto-connect if configured
             let sam_opt = match db::local::load_sam_db_config_full(&local).await {
@@ -180,6 +193,7 @@ pub fn run() {
             (
                 local,
                 sam_opt,
+                startup_encoders,
                 startup_crossfade_cfg,
                 startup_autodj_cfg,
                 startup_monitor_cfg,
@@ -216,6 +230,16 @@ pub fn run() {
     }
     if let Some(cfg) = startup_controller_cfg {
         app_state.controller_service.set_config(cfg, None);
+    }
+    for cfg in startup_encoders {
+        let assigned = app_state.encoder_manager.save_encoder(cfg.clone());
+        if assigned != cfg.id {
+            log::warn!(
+                "Startup encoder id remapped from {} to {} (legacy temp id)",
+                cfg.id,
+                assigned
+            );
+        }
     }
     if let Some(pool) = sam_pool_opt {
         app_state = app_state.with_sam_db(pool);
@@ -351,6 +375,150 @@ pub fn run() {
                         if let Some(msg) = audio_status.last_error {
                             let _ = app_handle
                                 .emit("audio_output_error", serde_json::json!({ "message": msg }));
+                        }
+                    }
+                }
+            });
+
+            // ── Encoder runtime + listener stats loop ─────────────────────────
+            // Emits encoder status/listener events and persists listener snapshots.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use crate::stats::icecast_stats;
+                use crate::stream::broadcaster::EncoderStatus;
+                use crate::stream::encoder_manager::OutputType;
+                use std::collections::HashMap;
+                use std::time::Duration;
+                use tauri::{Emitter, Manager};
+
+                let state = app_handle.state::<AppState>();
+                if let Some(pool) = state.local_db.as_ref() {
+                    if let Err(e) = icecast_stats::ensure_table(pool).await {
+                        log::warn!("listener stats table ensure failed: {e}");
+                    }
+                }
+
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                let mut last_runtime: HashMap<
+                    i64,
+                    crate::stream::broadcaster::EncoderRuntimeState,
+                > = HashMap::new();
+
+                loop {
+                    interval.tick().await;
+
+                    state.encoder_manager.refresh_runtime_counters();
+                    let runtime_list = state.encoder_manager.get_all_runtime();
+                    let mut runtime_map: HashMap<
+                        i64,
+                        crate::stream::broadcaster::EncoderRuntimeState,
+                    > = HashMap::new();
+                    for rt in runtime_list {
+                        runtime_map.insert(rt.id, rt);
+                    }
+
+                    for (id, rt) in &runtime_map {
+                        let changed = match last_runtime.get(id) {
+                            Some(prev) => {
+                                prev.status != rt.status
+                                    || prev.error != rt.error
+                                    || prev.listeners != rt.listeners
+                            }
+                            None => true,
+                        };
+                        if changed {
+                            let _ = app_handle.emit(
+                                "encoder_status_changed",
+                                serde_json::json!({
+                                    "id": *id,
+                                    "status": rt.status,
+                                    "listeners": rt.listeners,
+                                    "error": rt.error,
+                                }),
+                            );
+                        }
+                    }
+                    last_runtime = runtime_map.clone();
+
+                    let configs = state.encoder_manager.get_encoders();
+                    for cfg in configs {
+                        if matches!(cfg.output_type, OutputType::File) {
+                            continue;
+                        }
+
+                        let Some(rt) = runtime_map.get(&cfg.id) else {
+                            continue;
+                        };
+                        let should_poll = match &rt.status {
+                            EncoderStatus::Streaming
+                            | EncoderStatus::Connecting
+                            | EncoderStatus::Retrying { .. } => true,
+                            EncoderStatus::Recording
+                            | EncoderStatus::Disabled
+                            | EncoderStatus::Failed => false,
+                        };
+                        if !should_poll {
+                            continue;
+                        }
+
+                        let host = cfg.server_host.as_deref().unwrap_or("localhost");
+                        let port = cfg.server_port.unwrap_or(8000);
+                        let password = cfg.server_password.as_deref().unwrap_or("");
+                        let poll = match cfg.output_type {
+                            OutputType::Icecast => {
+                                let mount = cfg.mount_point.as_deref().unwrap_or("/stream");
+                                icecast_stats::poll_icecast(host, port, password, mount, cfg.id)
+                                    .await
+                            }
+                            OutputType::Shoutcast => {
+                                icecast_stats::poll_shoutcast(
+                                    host,
+                                    port,
+                                    password,
+                                    cfg.shoutcast_sid,
+                                    cfg.id,
+                                )
+                                .await
+                            }
+                            OutputType::File => unreachable!(),
+                        };
+
+                        match poll {
+                            Ok(snap) => {
+                                state
+                                    .encoder_manager
+                                    .update_listeners(cfg.id, snap.current_listeners);
+                                if let Some(pool) = state.local_db.as_ref() {
+                                    if let Err(e) =
+                                        icecast_stats::insert_snapshot(pool, &snap).await
+                                    {
+                                        log::warn!(
+                                            "listener snapshot insert failed for encoder {}: {}",
+                                            cfg.id,
+                                            e
+                                        );
+                                    }
+                                }
+                                let _ = app_handle.emit(
+                                    "listener_count_updated",
+                                    serde_json::json!({
+                                        "encoderId": cfg.id,
+                                        "count": snap.current_listeners
+                                    }),
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "listener poll failed for encoder {} (type={:?} host={} port={} sid={} mount={}): {}",
+                                    cfg.id,
+                                    cfg.output_type,
+                                    host,
+                                    port,
+                                    cfg.shoutcast_sid,
+                                    cfg.mount_point.as_deref().unwrap_or("/stream"),
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -1062,6 +1230,8 @@ pub fn run() {
             set_deck_tempo,
             set_master_level,
             get_master_level,
+            set_local_monitor_muted,
+            get_local_monitor_muted,
             set_deck_loop,
             clear_deck_loop,
             get_deck_state,
@@ -1241,6 +1411,24 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+fn init_logging() {
+    std::panic::set_hook(Box::new(|info| {
+        let bt = std::backtrace::Backtrace::force_capture();
+        log::error!("panic: {info}\n{bt}");
+    }));
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    builder
+        .format_timestamp_millis()
+        .format_target(true)
+        .format_module_path(false);
+    if let Err(e) = builder.try_init() {
+        eprintln!("[startup] logger init skipped: {e}");
+    } else {
+        log::info!("Logger initialized");
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1387,10 +1575,27 @@ async fn pick_next_track(
         let guard = state.sam_db.read().await;
         guard.as_ref().cloned()
     }?;
+    let active_song_ids: std::collections::HashSet<i64> = {
+        let engine = state.engine.lock().unwrap();
+        [
+            crate::audio::crossfade::DeckId::DeckA,
+            crate::audio::crossfade::DeckId::DeckB,
+            crate::audio::crossfade::DeckId::SoundFx,
+            crate::audio::crossfade::DeckId::Aux1,
+            crate::audio::crossfade::DeckId::Aux2,
+            crate::audio::crossfade::DeckId::VoiceFx,
+        ]
+        .iter()
+        .filter_map(|deck| engine.get_deck_state(*deck).and_then(|ev| ev.song_id))
+        .collect()
+    };
 
     if let Ok(queue) = crate::db::sam::get_queue(&sam_pool).await {
         for entry in queue {
             if claimed_queue_ids.contains(&entry.id) {
+                continue;
+            }
+            if active_song_ids.contains(&entry.song_id) {
                 continue;
             }
             let mut song = entry.song;
@@ -1401,6 +1606,9 @@ async fn pick_next_track(
                     .flatten();
             }
             if let Some(song) = song {
+                if active_song_ids.contains(&song.id) {
+                    continue;
+                }
                 let translated = translate_sam_file_path(&local_pool, song.filename.clone()).await;
                 return Some(RuntimeTrackPick {
                     song_id: song.id,
@@ -1418,10 +1626,15 @@ async fn pick_next_track(
         return None;
     }
 
-    let rotation_pick = crate::scheduler::rotation::select_next_track(&local_pool, &sam_pool, None)
-        .await
-        .ok()
-        .flatten()?;
+    let rotation_pick = crate::scheduler::rotation::select_next_track_with_exclusions(
+        &local_pool,
+        &sam_pool,
+        None,
+        Some(&active_song_ids),
+    )
+    .await
+    .ok()
+    .flatten()?;
     let translated = translate_sam_file_path(&local_pool, rotation_pick.file_path).await;
 
     Some(RuntimeTrackPick {
@@ -1611,6 +1824,49 @@ async fn process_track_completions(
         {
             log::warn!(
                 "Failed to append history for completed track (song_id={}): {}",
+                ev.song_id,
+                err
+            );
+        }
+
+        let request_origin = if let Some(local) = &local_pool {
+            match crate::scheduler::request_policy::consume_oldest_accepted_request_for_song(
+                local, ev.song_id,
+            )
+            .await
+            {
+                Ok(Some(request_id)) => {
+                    log::info!(
+                        "Matched completed play to accepted request (song_id={}, request_id={})",
+                        ev.song_id,
+                        request_id
+                    );
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    log::warn!(
+                        "Failed to resolve request-origin for completed track (song_id={}): {}",
+                        ev.song_id,
+                        err
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if let Err(err) = crate::db::sam::update_songlist_play_stats(
+            &sam_pool,
+            ev.song_id,
+            listener_snapshot,
+            request_origin,
+        )
+        .await
+        {
+            log::warn!(
+                "Failed to update songlist playback stats (song_id={}): {}",
                 ev.song_id,
                 err
             );

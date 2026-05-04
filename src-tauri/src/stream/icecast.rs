@@ -8,7 +8,8 @@ use ringbuf::traits::Consumer as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use super::encoder_manager::EncoderConfig;
+use super::encoder_manager::{EncoderConfig, EncoderManager};
+use super::mp3::Mp3Encoder;
 
 /// Icecast / Shoutcast connection parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,8 +58,7 @@ impl StreamHandle {
 
 /// Start an Icecast streaming thread.
 ///
-/// Reads interleaved stereo f32 PCM from `audio_consumer`, encodes to MP3
-/// (via the `mp3lame-encoder` crate if available, otherwise raw PCM for now),
+/// Reads interleaved f32 PCM from `audio_consumer`, encodes to MP3,
 /// and HTTP PUT-streams to the Icecast server.
 ///
 /// Returns a `StreamHandle` that can be used to stop the stream.
@@ -100,7 +100,7 @@ fn stream_loop(
 
     // Build a blocking reqwest client
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
@@ -147,11 +147,8 @@ fn stream_loop(
         }
     });
 
-    // PCM → (very simple) raw PCM streaming until we have an mp3 encoder.
-    // Frame buffer: ~20 ms at 44100 Hz stereo = 1764 samples = 3528 bytes
-    const FRAME_SAMPLES: usize = 1764 * 2; // stereo
-    let mut pcm_buf = vec![0.0f32; FRAME_SAMPLES];
-    let mut out_buf = Vec::with_capacity(FRAME_SAMPLES * 2);
+    let mut mp3 = new_mp3_encoder(config)?;
+    let mut pcm_buf = vec![0.0f32; mp3.frame_samples()];
 
     while !stop.load(Ordering::Relaxed) {
         // Drain audio from ring buffer into pcm_buf
@@ -173,16 +170,20 @@ fn stream_loop(
             continue;
         }
 
-        // Convert f32 PCM → 16-bit little-endian for streaming
-        out_buf.clear();
-        for &s in &pcm_buf[..filled] {
-            let sample_i16 = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            out_buf.extend_from_slice(&sample_i16.to_le_bytes());
+        let encoded = mp3.encode_f32_interleaved(&pcm_buf[..filled])?;
+        if encoded.is_empty() {
+            continue;
         }
 
-        if body_tx.send(out_buf.clone()).is_err() {
+        if body_tx.send(encoded.to_vec()).is_err() {
             log::warn!("Icecast body channel closed");
             break;
+        }
+    }
+
+    if let Ok(tail) = mp3.flush() {
+        if !tail.is_empty() {
+            let _ = body_tx.send(tail.to_vec());
         }
     }
 
@@ -234,22 +235,27 @@ impl BodyReader {
 // ── Async Icecast loop (used by EncoderManager) ──────────────────────────────
 
 /// Async Icecast HTTP PUT source streaming loop.
-/// Streams 16-bit LE PCM until stopped or connection error.
+/// Streams encoded MP3 frames until stopped or connection error.
 pub async fn stream_loop_async(
     config: &EncoderConfig,
     consumer: &mut ringbuf::HeapCons<f32>,
     stop_rx: &mut oneshot::Receiver<()>,
+    manager: &EncoderManager,
 ) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
     let host = config.server_host.as_deref().unwrap_or("localhost");
     let port = config.server_port.unwrap_or(8000);
     let mount = config.mount_point.as_deref().unwrap_or("/stream");
+    let username = config
+        .server_username
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("source");
     let password = config.server_password.as_deref().unwrap_or("");
     let stream_name = config.stream_name.as_deref().unwrap_or("DesiZone");
     let genre = config.stream_genre.as_deref().unwrap_or("Various");
     let bitrate = config.bitrate_kbps.unwrap_or(128);
     let sample_rate = config.sample_rate;
+    let public_flag = if config.is_public { "1" } else { "0" };
 
     let url = format!("http://{host}:{port}{mount}");
     log::info!("Icecast async: connecting to {url}");
@@ -259,36 +265,67 @@ pub async fn stream_loop_async(
 
     let body = reqwest::blocking::Body::new(BodyReader::new(body_rx));
     let url_clone = url.clone();
+    let auth_user = username.to_string();
     let auth_pass = password.to_string();
     let sn = stream_name.to_string();
     let gn = genre.to_string();
+    let pub_hdr = public_flag.to_string();
 
     // Fire the blocking PUT on a dedicated thread (reqwest blocking)
     let request_thread = std::thread::spawn(move || {
         let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("reqwest client");
-        let _ = client
+        let result = client
             .put(&url_clone)
-            .basic_auth("source", Some(auth_pass))
+            .basic_auth(auth_user, Some(auth_pass))
             .header("Content-Type", "audio/mpeg")
             .header("Icy-Name", sn)
             .header("Icy-Genre", gn)
             .header("Icy-Br", bitrate.to_string())
             .header("Icy-Sr", sample_rate.to_string())
-            .header("Icy-Pub", "0")
+            .header("Icy-Pub", pub_hdr)
             .header("Transfer-Encoding", "chunked")
             .body(body)
             .send();
+        match result {
+            Ok(resp) => {
+                log::info!(
+                    "Icecast async request completed with status={}",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                log::warn!("Icecast async request failed: {e}");
+            }
+        }
     });
 
-    const FRAME_SAMPLES: usize = 1764 * 2;
-    let mut pcm_buf = vec![0.0f32; FRAME_SAMPLES];
-    let mut out_buf = Vec::with_capacity(FRAME_SAMPLES * 2);
+    let mut mp3 = Mp3Encoder::from_config(config)?;
+    let mut pcm_buf = vec![0.0f32; mp3.frame_samples()];
+    let silence = vec![0.0f32; mp3.frame_samples()];
+    let channels = u64::from(config.channels.clamp(1, 2));
+    let per_channel_samples = (mp3.frame_samples() as u64 / channels).max(1);
+    let frame_interval =
+        Duration::from_secs_f64(per_channel_samples as f64 / f64::from(config.sample_rate.max(1)));
+    let keepalive_after = Duration::from_secs(2);
+    let mut last_sent = std::time::Instant::now();
+    let mut empty_since: Option<std::time::Instant> = None;
+    let mut pending_bytes: u64 = 0;
+    let mut last_flush = std::time::Instant::now();
 
     loop {
         if stop_rx.try_recv().is_ok() {
+            if pending_bytes > 0 {
+                manager.add_bytes_sent(config.id, pending_bytes);
+            }
+            if let Ok(tail) = mp3.flush() {
+                if !tail.is_empty() {
+                    manager.add_bytes_sent(config.id, tail.len() as u64);
+                    let _ = body_tx.send(tail.to_vec());
+                }
+            }
             drop(body_tx);
             let _ = request_thread.join();
             return Ok(());
@@ -306,24 +343,64 @@ pub async fn stream_loop_async(
         }
 
         if filled == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            let now = std::time::Instant::now();
+            let empty_at = *empty_since.get_or_insert(now);
+            let idle_for = now.saturating_duration_since(empty_at);
+            if idle_for >= keepalive_after && last_sent.elapsed() >= frame_interval {
+                let encoded = mp3.encode_f32_interleaved(&silence)?;
+                if !encoded.is_empty() {
+                    if body_tx.send(encoded.to_vec()).is_err() {
+                        log::warn!("Icecast body channel closed — reconnecting");
+                        let _ = request_thread.join();
+                        return Err("Icecast connection dropped".to_string());
+                    }
+                    pending_bytes = pending_bytes.saturating_add(encoded.len() as u64);
+                    last_sent = std::time::Instant::now();
+                }
+            } else {
+                tokio::time::sleep(Duration::from_millis(3)).await;
+            }
+            continue;
+        }
+        empty_since = None;
+
+        let encoded = mp3.encode_f32_interleaved(&pcm_buf[..filled])?;
+        if encoded.is_empty() {
+            tokio::task::yield_now().await;
             continue;
         }
 
-        out_buf.clear();
-        for &s in &pcm_buf[..filled] {
-            let s16 = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-            out_buf.extend_from_slice(&s16.to_le_bytes());
-        }
-
-        if body_tx.send(out_buf.clone()).is_err() {
+        if body_tx.send(encoded.to_vec()).is_err() {
             log::warn!("Icecast body channel closed — reconnecting");
             let _ = request_thread.join();
             return Err("Icecast connection dropped".to_string());
         }
+        pending_bytes = pending_bytes.saturating_add(encoded.len() as u64);
+        last_sent = std::time::Instant::now();
+        if pending_bytes >= 16 * 1024 || last_flush.elapsed() >= Duration::from_millis(500) {
+            manager.add_bytes_sent(config.id, pending_bytes);
+            pending_bytes = 0;
+            last_flush = std::time::Instant::now();
+        }
 
         tokio::task::yield_now().await;
     }
+}
+
+fn config_num_channels(_config: &IcecastConfig) -> u8 {
+    // This legacy path only supports mono/stereo and defaults to stereo.
+    2
+}
+
+fn new_mp3_encoder(config: &IcecastConfig) -> Result<Mp3Encoder, String> {
+    let cfg = EncoderConfig {
+        channels: config_num_channels(config),
+        sample_rate: config.sample_rate,
+        bitrate_kbps: Some(config.bitrate_kbps),
+        quality: None,
+        ..EncoderConfig::default()
+    };
+    Mp3Encoder::from_config(&cfg)
 }
 
 /// Quick TCP-level connection test (does not stream audio).
@@ -331,21 +408,34 @@ pub async fn test_icecast_connection(config: &EncoderConfig) -> Result<(), Strin
     let host = config.server_host.as_deref().unwrap_or("localhost");
     let port = config.server_port.unwrap_or(8000);
     let mount = config.mount_point.as_deref().unwrap_or("/stream");
+    let username = config
+        .server_username
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("source");
     let password = config.server_password.as_deref().unwrap_or("");
 
     let url = format!("http://{host}:{port}{mount}");
+    log::info!(
+        "Icecast test: host={} port={} mount={} user={}",
+        host,
+        port,
+        mount,
+        username
+    );
 
     let client = reqwest::Client::new();
     // HEAD request to check connectivity
     let result = client
         .head(&url)
-        .basic_auth("source", Some(password))
+        .basic_auth(username, Some(password))
         .timeout(Duration::from_secs(5))
         .send()
         .await;
 
     match result {
         Ok(resp) => {
+            log::info!("Icecast test response status={}", resp.status());
             // Icecast will return 200 or 404 (mount not found) — either means
             // the server is reachable and accepts our credentials.
             if resp.status().as_u16() < 500 {

@@ -162,6 +162,19 @@ pub async fn get_master_level(state: State<'_, AppState>) -> Result<f32, String>
 }
 
 #[tauri::command]
+pub async fn set_local_monitor_muted(
+    muted: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.engine.lock().unwrap().set_local_monitor_muted(muted)
+}
+
+#[tauri::command]
+pub async fn get_local_monitor_muted(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.engine.lock().unwrap().get_local_monitor_muted())
+}
+
+#[tauri::command]
 pub async fn set_headphone_mix(value: f32, state: State<'_, AppState>) -> Result<(), String> {
     state.engine.lock().unwrap().set_headphone_mix(value)
 }

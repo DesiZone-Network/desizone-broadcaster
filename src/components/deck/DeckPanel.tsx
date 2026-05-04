@@ -39,13 +39,12 @@ import { writeEventLog } from "../../lib/bridge7";
 import type { SamSong } from "../../lib/bridge";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { VUMeter } from "./VUMeter";
-import { parseSongDragPayload } from "../../lib/songDrag";
+import { parseSongDragFromDataTransfer } from "../../lib/songDrag";
 
 interface Props {
     deckId: DeckId;
     label: string;
     accentColor?: string;
-    isOnAir?: boolean;
     onCollapse?: () => void;
 }
 
@@ -268,7 +267,7 @@ function detectStemSource(path: string | null | undefined, analysis: StemAnalysi
     return "original";
 }
 
-export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = false, onCollapse }: Props) {
+export function DeckPanel({ deckId, label, accentColor = "#f59e0b", onCollapse }: Props) {
     const [deckState, setDeckState] = useState<DeckStateEvent | null>(null);
     const [vuData, setVuData] = useState<VuEvent | null>(null);
     const [volume, setVolume] = useState(1.0);
@@ -311,8 +310,10 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
     const jogPixelAccumulatorRef = useRef(0);
     const jogPendingStepsRef = useRef(0);
     const jogLastInvokeAtRef = useRef(0);
+    const dragDepthRef = useRef(0);
 
     const isPlaying = deckState?.state === "playing" || deckState?.state === "crossfading";
+    const isDeckLive = isPlaying && monitorMode === "air";
     const positionMs = deckState?.position_ms ?? 0;
     const durationMs = deckState?.duration_ms ?? 0;
     const remaining = Math.max(0, durationMs - positionMs);
@@ -1024,6 +1025,42 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
         e.target.value = "";
     };
 
+    const handleSongDrop = useCallback(async (dataTransfer: DataTransfer) => {
+        const { song, error } = parseSongDragFromDataTransfer(dataTransfer);
+        if (error) {
+            showLoadError(error);
+            writeEventLog({
+                level: "warn",
+                category: "system",
+                event: "invalid_song_drop_payload",
+                message: `Ignored invalid drop payload on ${deckId}: ${error}`,
+                deck: deckId,
+            }).catch(() => {});
+            return;
+        }
+        const droppedSong = song as SamSong | null;
+        if (!droppedSong) {
+            showLoadError("Dropped item is missing song metadata.");
+            return;
+        }
+        try {
+            await loadTrack(deckId, droppedSong.filename, droppedSong.id);
+            setLoadError(null);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            showLoadError(msg);
+            setLoadedSong(null);
+            writeEventLog({
+                level: "error",
+                category: "audio",
+                event: "track_load_failed",
+                message: `Failed to load "${droppedSong.artist} – ${droppedSong.title}" on ${deckId}: ${msg}`,
+                deck: deckId,
+                songId: droppedSong.id,
+            }).catch(() => {});
+        }
+    }, [deckId]);
+
     return (
         <div
             ref={panelRef}
@@ -1031,9 +1068,30 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
             tabIndex={0}
             onFocus={() => setIsFocused(true)}
             onBlur={() => setIsFocused(false)}
+            onDragEnter={(e) => {
+                e.preventDefault();
+                dragDepthRef.current += 1;
+                setIsDragOver(true);
+            }}
+            onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                setIsDragOver(true);
+            }}
+            onDragLeave={(e) => {
+                e.preventDefault();
+                dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+                if (dragDepthRef.current === 0) setIsDragOver(false);
+            }}
+            onDrop={async (e) => {
+                e.preventDefault();
+                dragDepthRef.current = 0;
+                setIsDragOver(false);
+                await handleSongDrop(e.dataTransfer);
+            }}
             style={{
-                borderColor: isOnAir ? accentColor + "70" : "var(--border-default)",
-                boxShadow: isOnAir ? `0 0 24px ${accentColor}20` : "none",
+                borderColor: isDeckLive ? accentColor + "70" : "var(--border-default)",
+                boxShadow: isDeckLive ? `0 0 24px ${accentColor}20` : "none",
                 flex: 1,
             }}
         >
@@ -1080,7 +1138,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                     >
                         {label}
                     </span>
-                    {isOnAir && (
+                    {isDeckLive && (
                         <span className="badge badge-on-air" style={{ fontSize: 8 }}>LIVE</span>
                     )}
                 </div>
@@ -1114,7 +1172,7 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                 </div>
             </div>
 
-            {/* Track Info — also a DnD drop target */}
+            {/* Track Info (panel-level DnD highlight) */}
             <div
                 style={{
                     background: isDragOver ? `${accentColor}12` : "var(--bg-input)",
@@ -1125,38 +1183,6 @@ export function DeckPanel({ deckId, label, accentColor = "#f59e0b", isOnAir = fa
                     padding: "8px 10px",
                     minHeight: 48,
                     transition: "border-color 0.15s, background 0.15s",
-                }}
-                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setIsDragOver(true); }}
-                onDragLeave={() => setIsDragOver(false)}
-                onDrop={async (e) => {
-                    e.preventDefault();
-                    setIsDragOver(false);
-                    const raw = e.dataTransfer.getData("text/plain");
-                    if (!raw) return;
-                    const song = parseSongDragPayload(raw) as SamSong | null;
-                    if (!song) return;
-                    try {
-                        await loadTrack(deckId, song.filename, song.id);
-                        setLoadError(null);
-                        setLoadedSong({
-                            title: song.title,
-                            artist: song.artist,
-                            path: song.filename,
-                            picture: song.picture ?? null,
-                        });
-                    } catch (err) {
-                        const msg = err instanceof Error ? err.message : String(err);
-                        showLoadError(msg);
-                        setLoadedSong(null);
-                        writeEventLog({
-                            level: "error",
-                            category: "audio",
-                            event: "track_load_failed",
-                            message: `Failed to load "${song.artist} – ${song.title}" on ${deckId}: ${msg}`,
-                            deck: deckId,
-                            songId: song.id,
-                        }).catch(() => {});
-                    }
                 }}
             >
                 {loadError ? (

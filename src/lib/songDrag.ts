@@ -6,6 +6,12 @@ export interface SongDragPayload {
   song: Partial<SamSong>;
 }
 
+const APP_DRAG_SOURCES = new Set<SongDragPayload["source"]>([
+  "library",
+  "queue",
+  "requests",
+]);
+
 export function serializeSongDragPayload(
   song: Partial<SamSong>,
   source: SongDragPayload["source"]
@@ -20,10 +26,10 @@ export function parseSongDragPayload(raw: string): Partial<SamSong> | null {
     if (!parsed || typeof parsed !== "object") return null;
 
     const maybePayload = parsed as SongDragPayload;
-    const song =
-      maybePayload.version === 1 && maybePayload.song
-        ? maybePayload.song
-        : (parsed as Partial<SamSong>);
+    if (maybePayload.version !== 1 || !APP_DRAG_SOURCES.has(maybePayload.source)) {
+      return null;
+    }
+    const song = maybePayload.song;
 
     if (!song || typeof song !== "object") return null;
     if (typeof song.filename !== "string" || song.filename.trim().length === 0) {
@@ -34,4 +40,28 @@ export function parseSongDragPayload(raw: string): Partial<SamSong> | null {
   } catch {
     return null;
   }
+}
+
+export function parseSongDragFromDataTransfer(dataTransfer: DataTransfer): {
+  song: Partial<SamSong> | null;
+  error: string | null;
+} {
+  const raw =
+    dataTransfer.getData("text/plain") ||
+    dataTransfer.getData("application/json");
+  if (!raw) {
+    return {
+      song: null,
+      error: "No drag payload found. Drag tracks from Library, Queue, or Requests.",
+    };
+  }
+
+  const song = parseSongDragPayload(raw);
+  if (!song) {
+    return {
+      song: null,
+      error: "Unsupported drag payload. Drag tracks from Library, Queue, or Requests.",
+    };
+  }
+  return { song, error: null };
 }

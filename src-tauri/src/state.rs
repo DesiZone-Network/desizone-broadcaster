@@ -31,6 +31,8 @@ pub struct AppState {
     pub encoder_manager: EncoderManager,
     /// Phase 4 — audio fan-out broadcaster
     pub broadcaster: Broadcaster,
+    /// Phase 4 — ensures master->encoder broadcast loop starts once
+    pub broadcaster_loop_started: Mutex<bool>,
     /// Phase 5 — Lua scripting engine
     pub script_engine: ScriptEngine,
     /// Phase 5 — microphone input + Voice FX pipeline
@@ -69,6 +71,7 @@ impl AppState {
             stream_handle: Mutex::new(None),
             encoder_manager,
             broadcaster,
+            broadcaster_loop_started: Mutex::new(false),
             script_engine: ScriptEngine::new(),
             mic_input,
             voice_recording_path: Mutex::new(None),

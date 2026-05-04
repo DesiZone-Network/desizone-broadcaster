@@ -12,11 +12,12 @@ import { CrossfadeSettingsDialog } from "../crossfade/CrossfadeSettingsDialog";
 import SchedulerPage from "../automation/SchedulerPage";
 import {
     startCrossfade,
-    stopStream,
-    getStreamStatus,
-    onStreamConnected,
-    onStreamDisconnected,
     getDeckState,
+    getEncoders,
+    getEncoderRuntime,
+    onEncoderStatusChanged,
+    onListenerCountUpdated,
+    stopAllEncoders,
 } from "../../lib/bridge";
 import type { DeckId } from "../../lib/bridge";
 import { ScriptingPage } from "../../pages/ScriptingPage";
@@ -82,8 +83,8 @@ function normalizeLayoutState(raw: unknown): LayoutState {
 
 
 export function MainWindow() {
-    const [isOnAir, setIsOnAir] = useState(false);
-    const [streamConnected, setStreamConnected] = useState(false);
+    const [encoders, setEncoders] = useState<import("../../lib/bridge").EncoderConfig[]>([]);
+    const [encoderRuntime, setEncoderRuntime] = useState<Map<number, import("../../lib/bridge").EncoderRuntimeState>>(new Map());
     const [showPipeline, setShowPipeline] = useState(false);
     const [showScheduler, setShowScheduler] = useState(false);
     const [showScripting, setShowScripting] = useState(false);
@@ -118,26 +119,86 @@ export function MainWindow() {
         setLayout((l) => ({ ...l, [key]: !l[key] }));
     };
 
-    // Stream status
+    // Encoder/runtime status
     useEffect(() => {
-        getStreamStatus().then(setStreamConnected).catch(() => { });
-        const unsubCon = onStreamConnected(() => setStreamConnected(true));
-        const unsubDis = onStreamDisconnected(() => setStreamConnected(false));
+        const refresh = async () => {
+            try {
+                const [encs, rt] = await Promise.all([getEncoders(), getEncoderRuntime()]);
+                setEncoders(encs);
+                const map = new Map<number, import("../../lib/bridge").EncoderRuntimeState>();
+                rt.forEach((r) => map.set(r.id, r));
+                setEncoderRuntime(map);
+            } catch {
+                // no-op
+            }
+        };
+        refresh();
+        const timer = setInterval(refresh, 5000);
+
+        const unsubStatus = onEncoderStatusChanged((e) => {
+            setEncoderRuntime((prev) => {
+                const next = new Map(prev);
+                const prevRt = next.get(e.id);
+                next.set(e.id, {
+                    id: e.id,
+                    status: e.status,
+                    listeners: e.listeners ?? prevRt?.listeners ?? null,
+                    uptime_secs: prevRt?.uptime_secs ?? 0,
+                    bytes_sent: prevRt?.bytes_sent ?? 0,
+                    current_bitrate_kbps: prevRt?.current_bitrate_kbps ?? null,
+                    error: e.error ?? prevRt?.error ?? null,
+                    recording_file: prevRt?.recording_file ?? null,
+                });
+                return next;
+            });
+        });
+
+        const unsubListeners = onListenerCountUpdated((e) => {
+            setEncoderRuntime((prev) => {
+                const prevRt = prev.get(e.encoderId);
+                const next = new Map(prev);
+                next.set(e.encoderId, {
+                    id: e.encoderId,
+                    status: prevRt?.status ?? "connecting",
+                    listeners: e.count,
+                    uptime_secs: prevRt?.uptime_secs ?? 0,
+                    bytes_sent: prevRt?.bytes_sent ?? 0,
+                    current_bitrate_kbps: prevRt?.current_bitrate_kbps ?? null,
+                    error: prevRt?.error ?? null,
+                    recording_file: prevRt?.recording_file ?? null,
+                });
+                return next;
+            });
+        });
+
         return () => {
-            unsubCon.then((f) => f());
-            unsubDis.then((f) => f());
+            clearInterval(timer);
+            unsubStatus.then((f) => f()).catch(() => { });
+            unsubListeners.then((f) => f()).catch(() => { });
         };
     }, []);
+
+    const networkEncoderIds = new Set(
+        encoders.filter((e) => e.output_type !== "file").map((e) => e.id)
+    );
+    const networkRuntime = [...encoderRuntime.values()].filter((rt) =>
+        networkEncoderIds.has(rt.id)
+    );
+    const isStreaming = (status: import("../../lib/bridge").EncoderRuntimeState["status"]) =>
+        typeof status === "string" && status === "streaming";
+
+    const onAir = networkRuntime.some((rt) => isStreaming(rt.status));
+    const streamConnected = onAir;
+    const totalListeners = networkRuntime.reduce(
+        (sum, rt) => sum + (isStreaming(rt.status) ? (rt.listeners ?? 0) : 0),
+        0
+    );
 
     // Keyboard shortcuts
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
             if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
             if (e.key === "F1") setShowPipeline((v) => !v);
-            if (e.key === "F5") {
-                e.preventDefault();
-                setIsOnAir((v) => !v);
-            }
         };
         window.addEventListener("keydown", handler);
         return () => window.removeEventListener("keydown", handler);
@@ -179,8 +240,7 @@ export function MainWindow() {
 
     const handleStopStream = async () => {
         try {
-            await stopStream();
-            setStreamConnected(false);
+            await stopAllEncoders();
         } catch (e) {
             console.error(e);
         }
@@ -214,7 +274,11 @@ export function MainWindow() {
             }}
         >
             {/* Top bar */}
-            <TopBar isOnAir={isOnAir} streamConnected={streamConnected} />
+            <TopBar
+                onAir={onAir}
+                streamConnected={streamConnected}
+                totalListeners={totalListeners}
+            />
 
             {/* Toolbar row */}
             <div
@@ -233,16 +297,16 @@ export function MainWindow() {
                         fontSize: 10,
                         fontWeight: 700,
                         letterSpacing: "0.1em",
-                        background: isOnAir ? "var(--red)" : "var(--bg-elevated)",
-                        borderColor: isOnAir ? "var(--red)" : "var(--border-strong)",
-                        color: isOnAir ? "#fff" : "var(--text-muted)",
+                        background: onAir ? "var(--red)" : "var(--bg-elevated)",
+                        borderColor: onAir ? "var(--red)" : "var(--border-strong)",
+                        color: onAir ? "#fff" : "var(--text-muted)",
                     }}
-                    onClick={() => setIsOnAir((v) => !v)}
-                    title="F5"
+                    onClick={() => setShowStreaming(true)}
+                    title="Open Encoders & Streaming"
                 >
                     <div
-                        className={isOnAir ? "pulse-dot pulse-dot-red" : ""}
-                        style={!isOnAir ? { width: 7, height: 7, borderRadius: "50%", background: "var(--text-muted)" } : {}}
+                        className={onAir ? "pulse-dot pulse-dot-red" : ""}
+                        style={!onAir ? { width: 7, height: 7, borderRadius: "50%", background: "var(--text-muted)" } : {}}
                     />
                     ON AIR
                 </button>
@@ -488,7 +552,6 @@ export function MainWindow() {
                                     deckId="deck_a"
                                     label="DECK A"
                                     accentColor="#f59e0b"
-                                    isOnAir={isOnAir}
                                     onCollapse={() => toggleLayout("deckA")}
                                 />
                             )}

@@ -46,14 +46,19 @@ export function ListenerGraph({
         content: "",
         visible: false,
     });
-    // live data buffer: map encoder id → last N counts
-    const [liveData, setLiveData] = useState<Map<number, number[]>>(new Map());
+    // live data buffer: map encoder id → last N listener points
+    const [liveData, setLiveData] = useState<Map<number, { ts: number; count: number }[]>>(
+        new Map()
+    );
 
     // Subscribe to live listener events
     useEffect(() => {
         const unsub = onListenerCountUpdated((e) => {
             setLiveData((prev) => {
-                const arr = [...(prev.get(e.encoderId) ?? []), e.count].slice(-120);
+                const arr = [
+                    ...(prev.get(e.encoderId) ?? []),
+                    { ts: Date.now(), count: e.count },
+                ].slice(-240);
                 return new Map(prev).set(e.encoderId, arr);
             });
         });
@@ -67,9 +72,10 @@ export function ListenerGraph({
                 ts: s.snapshot_at * 1000,
                 count: s.current_listeners,
             }));
-            return { enc, points: historical };
+            const live = liveData.get(enc.id) ?? [];
+            return { enc, points: [...historical, ...live].sort((a, b) => a.ts - b.ts) };
         });
-    }, [encoders, snapshots]);
+    }, [encoders, snapshots, liveData]);
 
     // Canvas drawing
     useEffect(() => {
@@ -91,7 +97,7 @@ export function ListenerGraph({
         ctx.scale(dpr, dpr);
         ctx.clearRect(0, 0, W, H);
 
-        const dataset = buildDataset().filter((d) => d.points.length > 1);
+        const dataset = buildDataset().filter((d) => d.points.length > 0);
 
         if (dataset.length === 0) {
             ctx.fillStyle = "rgba(255,255,255,0.15)";
@@ -168,15 +174,23 @@ export function ListenerGraph({
             ctx.lineJoin = "round";
             ctx.stroke();
 
-            // Fill area
-            ctx.lineTo(toX(points[points.length - 1].ts), PAD_T + chartH);
-            ctx.lineTo(toX(points[0].ts), PAD_T + chartH);
-            ctx.closePath();
-            const grad = ctx.createLinearGradient(0, PAD_T, 0, PAD_T + chartH);
-            grad.addColorStop(0, color + "30");
-            grad.addColorStop(1, color + "00");
-            ctx.fillStyle = grad;
-            ctx.fill();
+            if (points.length > 1) {
+                // Fill area
+                ctx.lineTo(toX(points[points.length - 1].ts), PAD_T + chartH);
+                ctx.lineTo(toX(points[0].ts), PAD_T + chartH);
+                ctx.closePath();
+                const grad = ctx.createLinearGradient(0, PAD_T, 0, PAD_T + chartH);
+                grad.addColorStop(0, color + "30");
+                grad.addColorStop(1, color + "00");
+                ctx.fillStyle = grad;
+                ctx.fill();
+            } else {
+                const only = points[0];
+                ctx.beginPath();
+                ctx.arc(toX(only.ts), toY(only.count), 2.5, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+            }
             ctx.restore();
 
             // Encoder label

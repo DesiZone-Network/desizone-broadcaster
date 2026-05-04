@@ -29,8 +29,12 @@ function makeDefault(): EncoderConfig {
 
         server_host: "",
         server_port: 8000,
+        server_username: "source",
         server_password: "",
         mount_point: "/stream",
+        icecast_version: "v2",
+        shoutcast_version: "v2",
+        shoutcast_sid: 1,
         stream_name: "DesiZone",
         stream_genre: "Bollywood",
         stream_url: null,
@@ -44,9 +48,11 @@ function makeDefault(): EncoderConfig {
 
         send_metadata: true,
         icy_metadata_interval: 16000,
+        metadata_caption_template: "$combine$",
+        metadata_url_append: null,
 
         reconnect_delay_secs: 10,
-        max_reconnect_attempts: 5,
+        max_reconnect_attempts: 0,
     };
 }
 
@@ -116,11 +122,13 @@ function TabConnection({
     set,
     onTest,
     testState,
+    testError,
 }: {
     enc: EncoderConfig;
     set: <K extends keyof EncoderConfig>(k: K, v: EncoderConfig[K]) => void;
     onTest: () => void;
     testState: "idle" | "testing" | "ok" | "fail";
+    testError: string | null;
 }) {
     if (enc.output_type === "file") {
         return (
@@ -173,6 +181,43 @@ function TabConnection({
 
     return (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+            {enc.output_type === "icecast" && (
+                <FormField label="Icecast Version" half>
+                    <select
+                        className="input"
+                        value={enc.icecast_version}
+                        onChange={(e) => set("icecast_version", e.target.value as EncoderConfig["icecast_version"])}
+                    >
+                        <option value="v1">Icecast 1</option>
+                        <option value="v2">Icecast 2</option>
+                    </select>
+                </FormField>
+            )}
+            {enc.output_type === "shoutcast" && (
+                <>
+                    <FormField label="Shoutcast Version" half>
+                        <select
+                            className="input"
+                            value={enc.shoutcast_version}
+                            onChange={(e) => set("shoutcast_version", e.target.value as EncoderConfig["shoutcast_version"])}
+                        >
+                            <option value="v1">Shoutcast v1</option>
+                            <option value="v2">Shoutcast v2</option>
+                        </select>
+                    </FormField>
+                    {enc.shoutcast_version === "v2" && (
+                        <FormField label="SID" half>
+                            <input
+                                className="input"
+                                type="number"
+                                value={enc.shoutcast_sid}
+                                onChange={(e) => set("shoutcast_sid", Number(e.target.value))}
+                                min={1}
+                            />
+                        </FormField>
+                    )}
+                </>
+            )}
             <FormField label="Server Host" half>
                 <input
                     className="input"
@@ -190,6 +235,14 @@ function TabConnection({
                 />
             </FormField>
 
+            <FormField label="Username" half>
+                <input
+                    className="input"
+                    value={enc.server_username ?? ""}
+                    onChange={(e) => set("server_username", e.target.value)}
+                    placeholder={enc.output_type === "icecast" ? "source" : "encoder"}
+                />
+            </FormField>
             <FormField label="Password">
                 <input
                     className="input"
@@ -200,16 +253,18 @@ function TabConnection({
                 />
             </FormField>
 
-            {enc.output_type === "icecast" && (
+            {(enc.output_type === "icecast" || enc.output_type === "shoutcast") && (
                 <>
-                    <FormField label="Mount Point" half>
-                        <input
-                            className="input"
-                            value={enc.mount_point ?? ""}
-                            onChange={(e) => set("mount_point", e.target.value)}
-                            placeholder="/stream"
-                        />
-                    </FormField>
+                    {enc.output_type === "icecast" && (
+                        <FormField label="Mount Point" half>
+                            <input
+                                className="input"
+                                value={enc.mount_point ?? ""}
+                                onChange={(e) => set("mount_point", e.target.value)}
+                                placeholder="/stream"
+                            />
+                        </FormField>
+                    )}
                     <FormField label="Stream Name" half>
                         <input
                             className="input"
@@ -252,6 +307,11 @@ function TabConnection({
                     {testState === "testing" ? "Testing…" : testState === "ok" ? "Connected" : testState === "fail" ? "Failed" : ""}
                 </button>
             </div>
+            {testError && (
+                <div style={{ marginTop: 6, fontSize: 11, color: "var(--red)", maxWidth: "100%" }}>
+                    {testError}
+                </div>
+            )}
         </div>
     );
 }
@@ -354,6 +414,26 @@ function TabAdvanced({ enc, set }: { enc: EncoderConfig; set: <K extends keyof E
                     />
                 </FormField>
             )}
+            {enc.send_metadata && (
+                <FormField label="Caption Template">
+                    <input
+                        className="input"
+                        value={enc.metadata_caption_template ?? ""}
+                        onChange={(e) => set("metadata_caption_template", e.target.value || null)}
+                        placeholder="$combine$"
+                    />
+                </FormField>
+            )}
+            {enc.output_type === "icecast" && enc.send_metadata && (
+                <FormField label="URL Append Template">
+                    <input
+                        className="input"
+                        value={enc.metadata_url_append ?? ""}
+                        onChange={(e) => set("metadata_url_append", e.target.value || null)}
+                        placeholder="&artist=$artist$&title=$title$"
+                    />
+                </FormField>
+            )}
             <FormField label="Stream Description">
                 <textarea
                     className="input"
@@ -382,6 +462,7 @@ export function EncoderEditor({ initial, onClose, onSaved }: Props) {
     const [saving, setSaving] = useState(false);
     const [testState, setTestState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
     const [error, setError] = useState<string | null>(null);
+    const [testError, setTestError] = useState<string | null>(null);
 
     const set = <K extends keyof EncoderConfig>(key: K, value: EncoderConfig[K]) =>
         setEncState((prev) => ({ ...prev, [key]: value }));
@@ -400,12 +481,17 @@ export function EncoderEditor({ initial, onClose, onSaved }: Props) {
     };
 
     const handleTest = async () => {
+        setTestError(null);
         setTestState("testing");
         try {
             const ok = await testEncoderConnection(enc.id);
             setTestState(ok ? "ok" : "fail");
-        } catch {
+            if (!ok) {
+                setTestError("Connection test returned failure.");
+            }
+        } catch (e: any) {
             setTestState("fail");
+            setTestError(String(e));
         }
         setTimeout(() => setTestState("idle"), 4000);
     };
@@ -450,7 +536,13 @@ export function EncoderEditor({ initial, onClose, onSaved }: Props) {
                 <div className="encoder-editor-body">
                     {tab === "general" && <TabGeneral enc={enc} set={set} />}
                     {tab === "connection" && (
-                        <TabConnection enc={enc} set={set} onTest={handleTest} testState={testState} />
+                        <TabConnection
+                            enc={enc}
+                            set={set}
+                            onTest={handleTest}
+                            testState={testState}
+                            testError={testError}
+                        />
                     )}
                     {tab === "codec" && <TabCodec enc={enc} set={set} />}
                     {tab === "advanced" && <TabAdvanced enc={enc} set={set} />}

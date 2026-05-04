@@ -67,6 +67,15 @@ export default function StreamingPage() {
         if (encoders.length > 0) loadSnapshots(encoders, period);
     }, [encoders, period]);
 
+    // Keep listener trend fresh while the page is open.
+    useEffect(() => {
+        if (encoders.length === 0) return;
+        const iv = setInterval(() => {
+            loadSnapshots(encoders, period);
+        }, 15000);
+        return () => clearInterval(iv);
+    }, [encoders, period, loadSnapshots]);
+
     // Poll runtime state every 5 s
     useEffect(() => {
         const iv = setInterval(loadRuntime, 5000);
@@ -79,13 +88,16 @@ export default function StreamingPage() {
         const off1 = onEncoderStatusChanged((e) => {
             setRuntime((prev) => {
                 const rt = prev.get(e.id);
-                if (!rt) return prev;
                 const next = new Map(prev);
                 next.set(e.id, {
-                    ...rt,
+                    id: e.id,
                     status: e.status,
+                    uptime_secs: rt?.uptime_secs ?? 0,
+                    bytes_sent: rt?.bytes_sent ?? 0,
+                    current_bitrate_kbps: rt?.current_bitrate_kbps ?? null,
+                    recording_file: rt?.recording_file ?? null,
                     error: e.error ?? null,
-                    listeners: e.listeners !== undefined ? e.listeners : rt.listeners,
+                    listeners: e.listeners !== undefined ? e.listeners : rt?.listeners ?? null,
                 });
                 return next;
             });
@@ -93,9 +105,17 @@ export default function StreamingPage() {
         const off2 = onListenerCountUpdated((e) => {
             setRuntime((prev) => {
                 const rt = prev.get(e.encoderId);
-                if (!rt) return prev;
                 const next = new Map(prev);
-                next.set(e.encoderId, { ...rt, listeners: e.count });
+                next.set(e.encoderId, {
+                    id: e.encoderId,
+                    status: rt?.status ?? "connecting",
+                    listeners: e.count,
+                    uptime_secs: rt?.uptime_secs ?? 0,
+                    bytes_sent: rt?.bytes_sent ?? 0,
+                    current_bitrate_kbps: rt?.current_bitrate_kbps ?? null,
+                    recording_file: rt?.recording_file ?? null,
+                    error: rt?.error ?? null,
+                });
                 return next;
             });
         });
@@ -113,10 +133,11 @@ export default function StreamingPage() {
         return false;
     });
 
-    const totalListeners = [...runtime.values()].reduce(
-        (sum, rt) => sum + (rt.listeners ?? 0),
-        0
-    );
+    const totalListeners = [...runtime.values()].reduce((sum, rt) => {
+        const s = rt.status;
+        const isStreaming = typeof s === "string" && s === "streaming";
+        return sum + (isStreaming ? (rt.listeners ?? 0) : 0);
+    }, 0);
 
     // ── Actions ─────────────────────────────────────────────────────────────────
 
@@ -144,7 +165,19 @@ export default function StreamingPage() {
 
     // ── Render ──────────────────────────────────────────────────────────────────
 
-    const graphEncoders = encoders.filter((e) => e.output_type !== "file" && e.enabled);
+    const activeNetworkIds = new Set(
+        [...runtime.values()]
+            .filter((rt) => {
+                if (typeof rt.status === "string") {
+                    return rt.status === "streaming" || rt.status === "connecting";
+                }
+                return "retrying" in rt.status;
+            })
+            .map((rt) => rt.id)
+    );
+    const graphEncoders = encoders.filter(
+        (e) => e.output_type !== "file" && activeNetworkIds.has(e.id)
+    );
 
     return (
         <div

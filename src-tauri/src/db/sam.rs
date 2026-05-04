@@ -429,6 +429,82 @@ pub async fn complete_track(
     Ok(())
 }
 
+/// Update play stats on `songlist` for a completed track.
+///
+/// This is schema-tolerant: optional columns are only written when they exist.
+pub async fn update_songlist_play_stats(
+    pool: &MySqlPool,
+    song_id: i64,
+    listener_snapshot: i32,
+    request_origin: bool,
+) -> Result<(), sqlx::Error> {
+    let has_count_played = column_exists(pool, "songlist", "count_played").await;
+    let has_date_played = column_exists(pool, "songlist", "date_played").await;
+    let has_date_artist_played = column_exists(pool, "songlist", "date_artist_played").await;
+    let has_date_title_played = column_exists(pool, "songlist", "date_title_played").await;
+    let has_date_album_played = column_exists(pool, "songlist", "date_album_played").await;
+    let has_count_performances = column_exists(pool, "songlist", "count_performances").await;
+    let has_count_requested = column_exists(pool, "songlist", "count_requested").await;
+    let has_last_requested = column_exists(pool, "songlist", "last_requested").await;
+
+    let mut qb: QueryBuilder<sqlx::MySql> = QueryBuilder::new("UPDATE songlist SET ");
+    let mut wrote_any = false;
+    let push_literal =
+        |expr: &str, qb: &mut QueryBuilder<sqlx::MySql>, wrote_any: &mut bool| {
+            if *wrote_any {
+                qb.push(", ");
+            }
+            qb.push(expr);
+            *wrote_any = true;
+        };
+
+    if has_count_played {
+        push_literal(
+            "count_played = COALESCE(count_played, 0) + 1",
+            &mut qb,
+            &mut wrote_any,
+        );
+    }
+    if has_date_played {
+        push_literal("date_played = NOW()", &mut qb, &mut wrote_any);
+    }
+    if has_date_artist_played {
+        push_literal("date_artist_played = NOW()", &mut qb, &mut wrote_any);
+    }
+    if has_date_title_played {
+        push_literal("date_title_played = NOW()", &mut qb, &mut wrote_any);
+    }
+    if has_date_album_played {
+        push_literal("date_album_played = NOW()", &mut qb, &mut wrote_any);
+    }
+    if has_count_performances {
+        if wrote_any {
+            qb.push(", ");
+        }
+        qb.push("count_performances = COALESCE(count_performances, 0) + ")
+            .push_bind(listener_snapshot.max(0));
+        wrote_any = true;
+    }
+    if request_origin && has_count_requested {
+        push_literal(
+            "count_requested = COALESCE(count_requested, 0) + 1",
+            &mut qb,
+            &mut wrote_any,
+        );
+    }
+    if request_origin && has_last_requested {
+        push_literal("last_requested = NOW()", &mut qb, &mut wrote_any);
+    }
+
+    if !wrote_any {
+        return Ok(());
+    }
+
+    qb.push(" WHERE ID = ").push_bind(song_id);
+    qb.build().execute(pool).await?;
+    Ok(())
+}
+
 // ── catlist ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

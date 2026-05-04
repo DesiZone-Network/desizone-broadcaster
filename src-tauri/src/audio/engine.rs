@@ -97,6 +97,7 @@ struct RtState {
     cue_level: f32,
     headphone_mix: f32,
     master_level: f32,
+    local_monitor_muted: bool,
     sample_rate: u32,
     output_channels: usize,
     // Per-channel scratch buffers (avoid alloc in callback)
@@ -140,6 +141,9 @@ enum EngineCmd {
     },
     SetMasterLevel {
         level: f32,
+    },
+    SetLocalMonitorMuted {
+        muted: bool,
     },
     SetDeckPitch {
         deck: DeckId,
@@ -320,6 +324,7 @@ impl AudioEngine {
             cue_level: 1.0,
             headphone_mix: -1.0,
             master_level: 1.0,
+            local_monitor_muted: false,
             sample_rate,
             output_channels: channels.max(2),
             buf_deck_a: Vec::new(),
@@ -769,6 +774,18 @@ impl AudioEngine {
         self.rt_state.lock().unwrap().master_level
     }
 
+    pub fn set_local_monitor_muted(&mut self, muted: bool) -> Result<(), String> {
+        self.send_cmd(EngineCmd::SetLocalMonitorMuted { muted })
+    }
+
+    pub fn get_local_monitor_muted(&self) -> bool {
+        self.rt_state.lock().unwrap().local_monitor_muted
+    }
+
+    pub fn get_output_sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     pub fn get_headphone_mix(&self) -> f32 {
         self.rt_state.lock().unwrap().headphone_mix
     }
@@ -809,7 +826,7 @@ impl AudioEngine {
 
     pub fn get_vu_readings(&self) -> Vec<VuEvent> {
         let rt = self.rt_state.lock().unwrap();
-        [
+        let mut events: Vec<VuEvent> = [
             DeckId::DeckA,
             DeckId::DeckB,
             DeckId::SoundFx,
@@ -826,7 +843,33 @@ impl AudioEngine {
                 right_db: ch.vu_right_db,
             }
         })
-        .collect()
+        .collect();
+
+        let mut peak_l = 0.0_f32;
+        let mut peak_r = 0.0_f32;
+        for frame in rt.buf_master.chunks_exact(2) {
+            peak_l = peak_l.max(frame[0].abs());
+            peak_r = peak_r.max(frame[1].abs());
+        }
+        if rt.buf_master.len() % 2 == 1 {
+            peak_l = peak_l.max(rt.buf_master[rt.buf_master.len() - 1].abs());
+        }
+
+        let to_db = |linear: f32| {
+            if linear < 1e-10 {
+                -96.0
+            } else {
+                20.0 * linear.log10()
+            }
+        };
+
+        events.push(VuEvent {
+            channel: "master".to_string(),
+            left_db: to_db(peak_l),
+            right_db: to_db(peak_r),
+        });
+
+        events
     }
 
     // ── Private helpers ───────────────────────────────────────────────────
@@ -1109,7 +1152,9 @@ fn audio_callback(
         }
     }
 
-    if split_available {
+    if rt.local_monitor_muted {
+        output.fill(0.0);
+    } else if split_available {
         for frame in 0..render_frames {
             let out_i = frame * out_channels;
             let src_i = frame * 2;
@@ -1221,6 +1266,9 @@ fn process_commands(rt: &mut RtState, cmd_cons: &mut ringbuf::HeapCons<EngineCmd
             }
             EngineCmd::SetMasterLevel { level } => {
                 rt.master_level = level.clamp(0.0, 1.0);
+            }
+            EngineCmd::SetLocalMonitorMuted { muted } => {
+                rt.local_monitor_muted = muted;
             }
             EngineCmd::SetDeckPitch { deck, pct } => {
                 if let Some(d) = rt.decks.get_mut(&deck) {

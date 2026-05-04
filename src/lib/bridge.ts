@@ -66,7 +66,7 @@ export interface DeckStateEvent {
 }
 
 export interface VuEvent {
-  channel: DeckId;
+  channel: DeckId | "master";
   left_db: number;
   right_db: number;
 }
@@ -383,6 +383,12 @@ export const setMasterLevel = (level: number) =>
 
 export const getMasterLevel = () =>
   invoke<number>("get_master_level");
+
+export const setLocalMonitorMuted = (muted: boolean) =>
+  invoke<void>("set_local_monitor_muted", { muted });
+
+export const getLocalMonitorMuted = () =>
+  invoke<boolean>("get_local_monitor_muted");
 
 export const setHeadphoneMix = (value: number) =>
   invoke<void>("set_headphone_mix", { value });
@@ -894,6 +900,8 @@ export const onRequestReceived = (
 // ── Phase 4 — Encoder types ─────────────────────────────────────────────────
 
 export type OutputType = "icecast" | "shoutcast" | "file";
+export type IcecastVersion = "v1" | "v2";
+export type ShoutcastVersion = "v1" | "v2";
 export type EncoderCodec = "mp3" | "aac" | "ogg" | "wav" | "flac";
 export type FileRotation = "none" | "hourly" | "daily" | "by_size";
 
@@ -930,8 +938,12 @@ export interface EncoderConfig {
   // Icecast / Shoutcast
   server_host: string | null;
   server_port: number | null;
+  server_username: string | null;
   server_password: string | null;
   mount_point: string | null;
+  icecast_version: IcecastVersion;
+  shoutcast_version: ShoutcastVersion;
+  shoutcast_sid: number;
   stream_name: string | null;
   stream_genre: string | null;
   stream_url: string | null;
@@ -947,6 +959,8 @@ export interface EncoderConfig {
   // Metadata
   send_metadata: boolean;
   icy_metadata_interval: number;
+  metadata_caption_template: string | null;
+  metadata_url_append: string | null;
 
   // Reconnect
   reconnect_delay_secs: number;

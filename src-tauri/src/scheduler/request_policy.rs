@@ -401,6 +401,46 @@ pub async fn update_request_status(
     Ok(())
 }
 
+/// Mark the oldest accepted request for a song as played.
+///
+/// Returns `Some(request_id)` when a matching request was consumed, otherwise `None`.
+pub async fn consume_oldest_accepted_request_for_song(
+    pool: &SqlitePool,
+    song_id: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let mut tx = pool.begin().await?;
+    let maybe_request_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id
+         FROM request_log
+         WHERE song_id = ?
+           AND status = 'accepted'
+           AND played_at IS NULL
+         ORDER BY requested_at ASC
+         LIMIT 1",
+    )
+    .bind(song_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(request_id) = maybe_request_id {
+        sqlx::query("UPDATE request_log SET status = 'played', played_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(request_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(request_id))
+    } else {
+        tx.commit().await?;
+        Ok(None)
+    }
+}
+
 pub async fn get_request_history(
     pool: &SqlitePool,
     limit: i64,

@@ -3,7 +3,7 @@
 /// Polls Icecast/Shoutcast admin APIs every 30 seconds and stores snapshots
 /// in the local SQLite database. The Tauri frontend reads these via
 /// `get_listener_stats` / `get_current_listeners`.
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 // ── Snapshot model ────────────────────────────────────────────────────────────
 
@@ -51,9 +51,28 @@ struct IceSource {
 
 #[derive(Debug, Deserialize)]
 struct ShoutcastStats {
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
     currentlisteners: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
     peaklisteners: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
     uniquelisteners: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
+    bitrate: Option<u32>,
+    streams: Option<Vec<ShoutcastStreamStats>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShoutcastStreamStats {
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
+    id: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
+    currentlisteners: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
+    peaklisteners: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
+    uniquelisteners: Option<u32>,
+    #[serde(default, deserialize_with = "de_opt_u32_any")]
     bitrate: Option<u32>,
 }
 
@@ -117,36 +136,130 @@ pub async fn poll_shoutcast(
     host: &str,
     port: u16,
     password: &str,
+    sid: u32,
     encoder_id: i64,
 ) -> Result<ListenerSnapshot, String> {
-    let url = format!("http://{host}:{port}/statistics?json=1&sid=1&pass={password}");
-
+    let sid = sid.max(1);
     let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(8))
-        .send()
-        .await
-        .map_err(|e| format!("Shoutcast poll failed: {e}"))?;
+    let mut urls = vec![
+        format!("http://{host}:{port}/stats?sid={sid}&json=1"),
+        format!("http://{host}:{port}/stats?sid={sid}&json=1&pass={password}"),
+    ];
+    if !password.is_empty() {
+        urls.push(format!(
+            "http://{host}:{port}/statistics?json=1&sid={sid}&pass={password}"
+        ));
+    }
 
-    let stats = resp
-        .json::<ShoutcastStats>()
-        .await
-        .map_err(|e| format!("Shoutcast JSON parse error: {e}"))?;
+    let mut last_err = String::new();
+    let mut stats_opt: Option<ShoutcastStats> = None;
+    for url in &urls {
+        match client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(8))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("Shoutcast response read error: {e}"))?;
+                if !status.is_success() {
+                    last_err = format!("HTTP {status} for {url}");
+                    continue;
+                }
+                match serde_json::from_str::<ShoutcastStats>(&body) {
+                    Ok(parsed) => {
+                        stats_opt = Some(parsed);
+                        break;
+                    }
+                    Err(e) => {
+                        let snippet: String = body.chars().take(180).collect();
+                        last_err = format!("JSON parse error for {url}: {e}; body={snippet}");
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                last_err = format!("Request failed for {url}: {e}");
+            }
+        }
+    }
+    let stats = stats_opt.ok_or_else(|| format!("Shoutcast poll failed: {last_err}"))?;
+
+    let (current_listeners, peak_listeners, unique_listeners, stream_bitrate) = match stats
+        .streams
+        .as_ref()
+    {
+        Some(streams) => {
+            let stream = streams
+                .iter()
+                .find(|s| s.id.unwrap_or_default() == sid)
+                .or_else(|| {
+                    if streams.len() == 1 {
+                        streams.first()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| format!("Shoutcast SID {sid} not found in statistics response"))?;
+            (
+                stream.currentlisteners.unwrap_or(0),
+                stream.peaklisteners.unwrap_or(0),
+                stream.uniquelisteners.unwrap_or(0),
+                stream.bitrate,
+            )
+        }
+        None => {
+            // Some SHOUTcast servers return SID-filtered root stats without a
+            // `streams` array; use root fields in that case.
+            (
+                stats.currentlisteners.unwrap_or(0),
+                stats.peaklisteners.unwrap_or(0),
+                stats.uniquelisteners.unwrap_or(0),
+                stats.bitrate,
+            )
+        }
+    };
 
     let now = now_ts();
+    log::debug!(
+        "Shoutcast poll sid={} encoder_id={} listeners={} peak={} unique={} bitrate={:?}",
+        sid,
+        encoder_id,
+        current_listeners,
+        peak_listeners,
+        unique_listeners,
+        stream_bitrate
+    );
     Ok(ListenerSnapshot {
         id: None,
         encoder_id,
         snapshot_at: now,
-        current_listeners: stats.currentlisteners.unwrap_or(0),
-        peak_listeners: stats.peaklisteners.unwrap_or(0),
-        unique_listeners: stats.uniquelisteners.unwrap_or(0),
-        stream_bitrate: stats.bitrate,
+        current_listeners,
+        peak_listeners,
+        unique_listeners,
+        stream_bitrate,
     })
 }
 
 // ── SQLite persistence helpers ────────────────────────────────────────────────
+
+fn de_opt_u32_any<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else { return Ok(None) };
+    match v {
+        serde_json::Value::Number(n) => Ok(n.as_u64().and_then(|x| u32::try_from(x).ok())),
+        serde_json::Value::String(s) => Ok(s.trim().parse::<u32>().ok()),
+        serde_json::Value::Bool(b) => Ok(Some(if b { 1 } else { 0 })),
+        _ => Ok(None),
+    }
+}
 
 /// Ensure the `listener_snapshots` table exists in the local SQLite DB.
 pub async fn ensure_table(pool: &sqlx::SqlitePool) -> Result<(), sqlx::Error> {
